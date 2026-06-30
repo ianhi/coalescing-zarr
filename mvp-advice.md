@@ -112,6 +112,43 @@ return d-v-b argued for on `get_ranges`.) The Rust/Icechunk version gets this
 nearly for free: Icechunk already fetches concurrently internally; expose results
 as they land.
 
+### Measured, not hypothetical — the decode-cost crossover
+
+`/Users/ian/Documents/dev/virtual/benchmarks/decode_cost_bench.py` injects a
+**tunable per-tile decode cost** (a `time.sleep` *inside* the `to_thread` decode,
+so it occupies a worker and overlaps I/O like real GIL-releasing decode) and runs
+the `subcube` ROI over snailmail (lognormal latency + bandwidth pipe), reporting
+total wall **and time-to-first-decode**. Representative numbers (subcube, bw 200 MB/s,
+concurrency 16; `coalesced` = current barrier pipeline, `per_tile` = stock streaming):
+
+| latency | decode/tile | per_tile wall | coalesced wall | per_tile 1st-decode | coalesced 1st-decode |
+|---|---|---|---|---|---|
+| **mode 0** (warm/low) | 0 ms | 115 | **37** | 6 | 19 |
+| | 5 ms | **184** | 192 | 12 | 24 |
+| | 20 ms | **652** | 660 | 29 | 39 |
+| **mode 45 ms** (cloud) | 0 ms | 1685 | **73** | 25 | 52 |
+| | 20 ms | 2219 | **777** | 56 | 146 |
+
+(all ms). Three things to take to the MVP:
+
+1. **Coalescing's win is real and large under latency** — at mode 45 ms it beats
+   per-chunk by ~3–20× regardless of decode. This confirms the project's premise;
+   the cloud case it targets is exactly where it shines.
+2. **But the barrier *always* delays first-pixel** — `coalesced` starts decoding
+   2–3× later than `per_tile` in every row (it can't decode until its fetch lands).
+   That matters for interactive/progressive viewers even when total wall is fine.
+3. **At low latency + nontrivial decode the barrier flips to a loss** — by
+   decode ≳ 5 ms/tile at mode 0, `per_tile` (streaming) matches then beats
+   `coalesced` on *total* wall, because streaming hides its fetch under decode while
+   the barrier serializes fetch + over-read. The `pathological_column` ROI (20.8 MB
+   coalesced vs 11.5 MB per-tile — heavy over-read) loses by more.
+
+**Conclusion:** the barrier leaves measurable wall-clock on the table whenever
+decode isn't free. A **streaming `get_many_chunks`** keeps coalescing's round-trip
+win *and* recovers the overlap — it should be the MVP's target shape, not a later
+optimization. Use this script (extend its `STRATEGIES` with a streaming-coalesced
+variant) as the harness that proves it.
+
 **`max_gap` is therefore two knobs, not one:** round-trips ↔ over-read **and**
 round-trips ↔ pipelineability. Merging everything to one span maximizes the first
 and kills the second. The sweet spot is "few spans," not "one span" — keep enough
