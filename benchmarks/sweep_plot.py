@@ -42,14 +42,16 @@ CASES = [
     "icechunk",
     "icechunk-bigreq",
     "coalesced",
+    "coalesced-cap",
     "coalesced-wide",
 ]
-# Short x-axis labels (full names are long for a 5-case row).
+# Short x-axis labels (full names are long for a 6-case row).
 CASE_LABELS = {
     "manifest": "manifest",
     "icechunk": "ic\n(default)",
     "icechunk-bigreq": "ic\n(12MB+)",
     "coalesced": "coal.\n(16KB)",
+    "coalesced-cap": "coal.\nwide\ncap1M",
     "coalesced-wide": "coal.\nwide",
 }
 
@@ -60,6 +62,10 @@ COAL_GAP = 16 * 1024
 # A large gap that bridges everything -> a single GET with maximal over-read,
 # kept to show the over-merge extreme on the download axis.
 WIDE_GAP = 64 * 1024 * 1024
+# Bound a single coalesced request's size. Pairs with WIDE_GAP to show that
+# capping the span breaks the one giant GET into several bounded ones (parallel,
+# streamable) without changing total over-read.
+COAL_CAP = 1024 * 1024
 # icechunk's per-object request-split target. Default fragments a large chunk
 # read into ~ideal-sized sub-requests; setting it well above the chunk size
 # gives one GET per chunk (the "bigreq" case).
@@ -112,37 +118,34 @@ def _fmt_mb(mb: float) -> str:
     return f"{mb:.0f}MB" if mb >= 10 else f"{mb:.1f}MB"
 
 
+def _coal(h: Harness, **kw: object):
+    """A store_wrapper building a CoalescingManifestStore with given knobs."""
+    return lambda _base: CoalescingManifestStore(h.group, registry=h.registry, **kw)
+
+
+def _cases(h: Harness) -> list:
+    """The shared case list: stock baselines + coalescing variants."""
+    return [
+        ("manifest", h.plain_store(), None, STOCK_PIPELINE),
+        ("icechunk", h.icechunk_store(), None, STOCK_PIPELINE),
+        ("icechunk-bigreq", tuned_icechunk_store(h, BIGREQ), None, STOCK_PIPELINE),
+        ("coalesced", h.plain_store(), _coal(h, max_gap=COAL_GAP), PIPELINE_PATH),
+        (
+            "coalesced-cap",
+            h.plain_store(),
+            _coal(h, max_gap=WIDE_GAP, max_coalesced_bytes=COAL_CAP),
+            PIPELINE_PATH,
+        ),
+        ("coalesced-wide", h.plain_store(), _coal(h, max_gap=WIDE_GAP), PIPELINE_PATH),
+    ]
+
+
 def run_sweep(source_name: str) -> tuple[list, list[str], str]:
     source = NdpiSource(jpeg=False) if source_name == "ndpi" else SyntheticSource()
     with Harness(source=source, mode_ms=45, bandwidth_mbs=200, concurrency=16) as h:
         patterns = list(h.patterns)
         results = h.compare(
-            cases=[
-                ("manifest", h.plain_store(), None, STOCK_PIPELINE),
-                ("icechunk", h.icechunk_store(), None, STOCK_PIPELINE),
-                (
-                    "icechunk-bigreq",
-                    tuned_icechunk_store(h, BIGREQ),
-                    None,
-                    STOCK_PIPELINE,
-                ),
-                (
-                    "coalesced",
-                    h.plain_store(),
-                    lambda _base: CoalescingManifestStore(
-                        h.group, registry=h.registry, max_gap=COAL_GAP
-                    ),
-                    PIPELINE_PATH,
-                ),
-                (
-                    "coalesced-wide",
-                    h.plain_store(),
-                    lambda _base: CoalescingManifestStore(
-                        h.group, registry=h.registry, max_gap=WIDE_GAP
-                    ),
-                    PIPELINE_PATH,
-                ),
-            ],
+            cases=_cases(h),
             decode_ms=(DECODE_MS,),
             patterns=patterns,
         )
@@ -231,7 +234,58 @@ def plot(results: list, patterns: list[str], source_label: str, out: Path) -> No
     fig.suptitle(
         f"Coalescing vs stock ({source_label}): "
         "time-to-ready (log) + download (linear)\n"
-        f"Harness mode=45ms latency, 200 MB/s, concurrency=16, decode={DECODE_MS}ms/chunk",
+        "Harness mode=45ms latency, 200 MB/s, concurrency=16, "
+        f"decode={DECODE_MS}ms/chunk",
+        fontsize=11,
+    )
+    fig.savefig(out, dpi=200, bbox_inches="tight")
+    print(f"wrote {out}")
+
+
+DECODE_SWEEP = (0.0, 1.0, 5.0, 20.0)
+DECODE_PATTERN = "subcube"  # the representative ROI
+
+
+def run_decode_sweep(source_name: str) -> tuple[list, str]:
+    """Sweep per-chunk decode cost for one pattern, all cases.
+
+    Shows the streaming-vs-barrier tension: a single-GET coalesced read
+    (``coalesced-wide``) cannot overlap decode with fetch (all bytes land at
+    once), so its wall climbs with decode cost; streaming readers (stock,
+    small-gap / capped coalescing) overlap decode with in-flight fetches.
+    """
+    source = NdpiSource(jpeg=False) if source_name == "ndpi" else SyntheticSource()
+    with Harness(source=source, mode_ms=45, bandwidth_mbs=200, concurrency=16) as h:
+        results = h.compare(
+            cases=_cases(h), decode_ms=DECODE_SWEEP, patterns=[DECODE_PATTERN]
+        )
+    out = Path(__file__).parent / f"decode_{source_name}.json"
+    to_json(results, out)
+    print(f"wrote {out}")
+    return results, type(source).__name__
+
+
+def plot_decode(results: list, source_label: str, out: Path) -> None:
+    fig, ax = plt.subplots(figsize=(7.5, 5), constrained_layout=True)
+    for case in CASES:
+        rows = sorted(
+            (r for r in results if r.name == case), key=lambda r: r.decode_ms
+        )
+        ax.plot(
+            [r.decode_ms for r in rows],
+            [r.wall_ms for r in rows],
+            marker="o",
+            label=CASE_LABELS[case].replace("\n", " "),
+        )
+    ax.set_yscale("log")
+    ax.set_xlabel("per-chunk decode cost (ms)")
+    ax.set_ylabel("time to ready (ms, log)")
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8, title="case")
+    fig.suptitle(
+        f"Decode-cost sweep ({source_label}, {DECODE_PATTERN}): "
+        "streaming vs single-GET barrier\n"
+        "Harness mode=45ms latency, 200 MB/s, concurrency=16",
         fontsize=11,
     )
     fig.savefig(out, dpi=200, bbox_inches="tight")
@@ -240,5 +294,11 @@ def plot(results: list, patterns: list[str], source_label: str, out: Path) -> No
 
 if __name__ == "__main__":
     name = sys.argv[1] if len(sys.argv) > 1 else "synthetic"
-    results, patterns, label = run_sweep(name)
-    plot(results, patterns, label, Path(__file__).parent / f"sweep_{name}.png")
+    mode = sys.argv[2] if len(sys.argv) > 2 else "patterns"
+    base = Path(__file__).parent
+    if mode == "decode":
+        results, label = run_decode_sweep(name)
+        plot_decode(results, label, base / f"decode_{name}.png")
+    else:
+        results, patterns, label = run_sweep(name)
+        plot(results, patterns, label, base / f"sweep_{name}.png")
