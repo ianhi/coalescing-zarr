@@ -60,26 +60,12 @@ class CachedGetter:
         prototype: BufferPrototype,
         byte_range: ByteRequest | None = None,
     ) -> Buffer | None:
-        if self.buffer is None or byte_range is None:
-            return self.buffer
-        # The non-sharded virtual read path always requests whole chunks
-        # (byte_range is None). Handle a sub-range defensively for completeness.
-        from zarr.abc.store import (
-            OffsetByteRequest,
-            RangeByteRequest,
-            SuffixByteRequest,
-        )
-
-        data = self.buffer.to_bytes()
-        if isinstance(byte_range, RangeByteRequest):
-            sliced = data[byte_range.start : byte_range.end]
-        elif isinstance(byte_range, OffsetByteRequest):
-            sliced = data[byte_range.offset :]
-        elif isinstance(byte_range, SuffixByteRequest):
-            sliced = data[-byte_range.suffix :]
-        else:
-            sliced = data
-        return prototype.buffer.from_bytes(sliced)
+        # The non-sharded virtual read path requests whole chunks
+        # (byte_range is None). Partial/sharded decode is out of MVP scope, so
+        # fail loudly rather than silently return the wrong bytes if it appears.
+        if byte_range is not None:
+            raise NotImplementedError("CachedGetter serves whole chunks only")
+        return self.buffer
 
 
 class CoalescingCodecPipeline(BatchedCodecPipeline):
@@ -117,13 +103,8 @@ class CoalescingCodecPipeline(BatchedCodecPipeline):
         parent_read_batch = super().read_batch
 
         async def decode_one(index: int, entry: BatchEntry, buf: Buffer | None) -> None:
-            single: BatchEntry = (
-                CachedGetter(buf),
-                entry[1],
-                entry[2],
-                entry[3],
-                entry[4],
-            )
+            # Replace only the byte-getter; reuse the rest of the batch entry.
+            single: BatchEntry = (CachedGetter(buf), *entry[1:])
             res = await parent_read_batch([single], out, drop_axes)
             results[index] = res[0]
 

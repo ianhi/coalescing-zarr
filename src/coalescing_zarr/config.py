@@ -1,16 +1,14 @@
-"""Process-global coalescing knobs and pipeline registration.
+"""Default coalescing knobs and pipeline registration.
 
 The two knobs are intentionally minimal for the MVP. ``max_gap`` is the lever
 the design calls out as *two* tensions at once (round-trips vs over-read, and
-round-trips vs pipelineability); ``max_coalesced_bytes`` is a safety cap. A real
-cost model would replace these with something that optimizes
-wall-clock-to-last-decode — these live here, behind a single import, so that
-swap stays local.
+round-trips vs pipelineability); ``max_coalesced_bytes`` is a safety cap. These
+are only *defaults* — actual policy lives per-store on
+:class:`~coalescing_zarr.store.CoalescingManifestStore`, so a future cost model
+slots in there (or as an injected planner) rather than as a global swap.
 """
 
 from __future__ import annotations
-
-from dataclasses import dataclass
 
 import zarr
 from zarr.registry import register_pipeline as _register_pipeline_class
@@ -28,16 +26,6 @@ PIPELINE_PATH = "coalescing_zarr.pipeline.CoalescingCodecPipeline"
 # to the registry; it does not become active until ``register_pipeline()`` (or a
 # direct ``zarr.config.set``) points the config at it.
 _register_pipeline_class(CoalescingCodecPipeline)
-
-
-@dataclass
-class CoalescingSettings:
-    max_gap: int = DEFAULT_MAX_GAP
-    max_coalesced_bytes: int | None = DEFAULT_MAX_COALESCED_BYTES
-
-
-#: Mutable process-global settings, read by the store at request time.
-settings = CoalescingSettings()
 
 
 def register_pipeline() -> None:

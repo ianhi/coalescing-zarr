@@ -21,18 +21,23 @@ import asyncio
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import urlparse
 
 from virtualizarr.manifests import ManifestArray, ManifestGroup
 from virtualizarr.manifests.store import ManifestStore, _get_deepest_group_or_array
 from virtualizarr.manifests.utils import parse_manifest_index
 from zarr.core.config import config as zarr_config
 
-from coalescing_zarr.planning import ResolvedChunk, Span, plan_spans
+from coalescing_zarr.config import DEFAULT_MAX_COALESCED_BYTES, DEFAULT_MAX_GAP
+from coalescing_zarr.planning import ResolvedChunk, plan_spans
 
 if TYPE_CHECKING:
     from obspec_utils.registry import ObjectStoreRegistry
     from zarr.core.buffer import Buffer, BufferPrototype
+
+    from coalescing_zarr.planning import Span
+
+# Keys ending in any of these are metadata/group documents, not data chunks.
+_METADATA_SUFFIXES = ("zarr.json", ".zattrs", ".zgroup", ".zarray", ".zmetadata")
 
 
 @dataclass
@@ -40,8 +45,8 @@ class CoalescingStats:
     """Per-store counters, handy for tests and benchmarks.
 
     These count what the coalescing layer actually issued — *not* what the
-    underlying object store did. ``source_gets`` is the number of coalesced
-    range requests; ``over_read_bytes`` is bytes fetched but never handed back.
+    underlying object store did. ``spans`` is the number of coalesced range
+    requests; ``over_read_bytes`` is bytes fetched but never handed back.
     """
 
     calls: int = 0
@@ -59,15 +64,26 @@ class CoalescingStats:
 
 
 class CoalescingManifestStore(ManifestStore):
-    """A ManifestStore with a bulk, streaming ``get_many_chunks`` method."""
+    """A ManifestStore with a bulk, streaming ``get_many_chunks`` method.
+
+    The coalescing knobs are per-store policy: ``max_gap`` (unwanted bytes
+    tolerated between two chunks before merging their requests) and
+    ``max_coalesced_bytes`` (hard cap on one request). They are plain public
+    attributes so a benchmark or test can vary them per store, and so the
+    eventual Rust port has an obvious home for the same policy.
+    """
 
     def __init__(
         self,
         group: ManifestGroup,
         *,
         registry: ObjectStoreRegistry[Any] | None = None,
+        max_gap: int = DEFAULT_MAX_GAP,
+        max_coalesced_bytes: int | None = DEFAULT_MAX_COALESCED_BYTES,
     ) -> None:
         super().__init__(group, registry=registry)
+        self.max_gap = max_gap
+        self.max_coalesced_bytes = max_coalesced_bytes
         self.stats = CoalescingStats()
 
     def _resolve(self, key: str) -> ResolvedChunk | None:
@@ -79,8 +95,7 @@ class CoalescingManifestStore(ManifestStore):
         """
         node, suffix = _get_deepest_group_or_array(self._group, key)
         # Only data chunks are coalescable; metadata and group keys are not.
-        metadata_suffixes = ("zarr.json", ".zattrs", ".zgroup", ".zarray", ".zmetadata")
-        if suffix.endswith(metadata_suffixes):
+        if suffix.endswith(_METADATA_SUFFIXES):
             return None
         if not isinstance(node, ManifestArray):
             return None
@@ -96,36 +111,19 @@ class CoalescingManifestStore(ManifestStore):
         entry = manifest.get_entry(chunk_indexes)
         if entry is None:
             return None
-        path = entry["path"]
-        offset = int(entry["offset"])
-        length = int(entry["length"])
 
-        store, _ = self._registry.resolve(path)
-        if not store:
-            raise ValueError(f"No store registered for {path}")
-        path_in_store = self._path_in_store(store, path)
+        # ``resolve`` finds the object store for this file's URL and returns the
+        # store-relative path as its second element — the same prefix-stripping
+        # ManifestStore.get does, so we reuse it rather than recompute it. It
+        # raises ValueError itself if no store matches.
+        store, path_in_store = self._registry.resolve(entry["path"])
         return ResolvedChunk(
             key=key,
             store=store,
-            path=path_in_store,
-            offset=offset,
-            length=length,
+            path=str(path_in_store),
+            offset=int(entry["offset"]),
+            length=int(entry["length"]),
         )
-
-    @staticmethod
-    def _path_in_store(store: object, path: str) -> str:
-        # Mirrors ManifestStore.get: strip the store's own prefix/url path so we
-        # are left with the file path the object store expects.
-        path_in_store = urlparse(path).path
-        store_prefix = getattr(store, "prefix", None)
-        store_url = getattr(store, "url", None)
-        if store_prefix:
-            prefix = str(store_prefix).lstrip("/")
-        elif store_url:
-            prefix = urlparse(str(store_url)).path.lstrip("/")
-        else:
-            prefix = ""
-        return path_in_store.lstrip("/").removeprefix(prefix).lstrip("/")
 
     async def get_many_chunks(
         self,
@@ -142,13 +140,14 @@ class CoalescingManifestStore(ManifestStore):
         iteration order is *not* the input order — it is whatever order the
         underlying span fetches complete in — so the consumer can start decoding
         the first chunk without waiting for the slowest fetch.
-        """
-        from coalescing_zarr import config as _cfg
 
+        ``max_gap`` / ``max_coalesced_bytes`` default to the store's configured
+        policy; pass them to override per call.
+        """
         if max_gap is None:
-            max_gap = _cfg.settings.max_gap
+            max_gap = self.max_gap
         if max_coalesced_bytes is None:
-            max_coalesced_bytes = _cfg.settings.max_coalesced_bytes
+            max_coalesced_bytes = self.max_coalesced_bytes
 
         self.stats.calls += 1
         self.stats.chunks_requested += len(keys)
@@ -167,8 +166,9 @@ class CoalescingManifestStore(ManifestStore):
         )
         self.stats.spans += len(spans)
         for span in spans:
-            self.stats.useful_bytes += span.useful_bytes
-            self.stats.over_read_bytes += span.over_read
+            useful = span.useful_bytes
+            self.stats.useful_bytes += useful
+            self.stats.over_read_bytes += span.nbytes - useful
 
         if not spans:
             return
@@ -178,12 +178,14 @@ class CoalescingManifestStore(ManifestStore):
         concurrency = int(zarr_config.get("async.concurrency"))
         sem = asyncio.Semaphore(concurrency)
 
-        async def fetch(span: Span) -> tuple[Span, bytes]:
+        async def fetch(span: Span) -> tuple[Span, Any]:
             async with sem:
+                # obstore returns a zero-copy buffer-protocol object; we slice
+                # views out of it below without ever copying the span bytes.
                 raw = await span.store.get_range_async(
                     span.path, start=span.start, end=span.end
                 )
-            return span, bytes(raw)
+            return span, raw
 
         tasks = [asyncio.create_task(fetch(span)) for span in spans]
         try:
@@ -192,8 +194,11 @@ class CoalescingManifestStore(ManifestStore):
                 view = memoryview(raw)
                 for member in span.members:
                     rel = member.offset - span.start
-                    chunk_bytes = bytes(view[rel : rel + member.length])
-                    yield member.key, prototype.buffer.from_bytes(chunk_bytes)
+                    # from_bytes -> np.frombuffer wraps the view without copying;
+                    # the returned buffer keeps ``raw`` alive until it is decoded
+                    # (which happens immediately downstream), so this is safe.
+                    chunk_view = view[rel : rel + member.length]
+                    yield member.key, prototype.buffer.from_bytes(chunk_view)
         finally:
             for task in tasks:
                 if not task.done():
