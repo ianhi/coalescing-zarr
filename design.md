@@ -129,6 +129,46 @@ maximizes the first and kills the second. The sweet spot is "few spans," not
 "one span" — keep enough spans in flight to keep cores fed. **The cost model
 optimizes wall-clock-to-last-decode, not GET count.**
 
+### Decode granularity, and the store/pipeline seam
+
+Decode is done **per chunk**, not per span, and the pipeline only ever knows
+about **chunks** — never spans. This is both an architecture and a performance
+decision:
+
+- **Architecture.** The store owns coalescing; spans are its private internal
+  representation. `get_many_chunks` yields `(key, bytes)` one chunk at a time,
+  so the pipeline decodes per chunk and has no concept of a span. Yielding
+  span-grouped results would leak the store's internal structure across the
+  seam — exactly the boundary that lets the Python store stand in faithfully for
+  the eventual Rust/Icechunk-native version.
+- **Performance.** Per-chunk decode is not slower than batching a span's chunks
+  into one decode call. zarr's `decode_batch` already parallelizes *within* a
+  batch (`_batching_helper` → `concurrent_map` → one `to_thread` per item), so a
+  span-sized batch buys no extra decode parallelism. Per-chunk is if anything
+  better for slow (GIL-releasing) decode: each chunk's decode starts the instant
+  its bytes land and runs on its own core, uncapped by any per-call concurrency
+  budget. The members of one span arrive together (one GET), so decoding them
+  separately costs nothing in latency.
+
+The pipeline reuses zarr's stock `read_batch` for decode unchanged, feeding it
+prefetched bytes through a tiny `CachedGetter` adapter (the `ByteGetter`
+interface is `read_batch`'s only input channel for bytes). This avoids forking
+the version-specific decode/placement logic (codec chain, chunk-selection
+slicing, `out` placement, fill values, `drop_axes`).
+
+### Concurrency bound is an MVP artifact
+
+The Python store bounds its concurrent span fetches with an `asyncio.Semaphore`
+sized to `async.concurrency`, to re-establish the per-chunk concurrency bound
+zarr's stock read path applies (and which overriding `read()` would otherwise
+discard). This does **not** conflict with Icechunk in the MVP, because the
+backing fetches go through obstore, not Icechunk's store — Icechunk is not in
+the read path here. In the eventual Icechunk-native version the opposite holds:
+Icechunk already schedules its fetches concurrently, so the bulk method must
+**not** wrap them in an outer semaphore — that would double-bound. The semaphore
+is a stand-in for Icechunk's internal scheduler, to be dropped in the port, not
+carried over.
+
 ## Decisions
 
 - **Store-level range coalescing.** Range coalescing lives in the store behind a
