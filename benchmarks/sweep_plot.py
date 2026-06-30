@@ -25,7 +25,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 from coalescing_zarr import CoalescingManifestStore
 from coalescing_zarr.config import PIPELINE_PATH
-from perf_harness import Harness, STOCK_PIPELINE
+from perf_harness import STOCK_PIPELINE, Harness
 
 PATTERNS = ["band", "subcube", "column", "timeseries"]
 CASES = ["icechunk", "manifest", "coalesced", "coalesced-wide"]
