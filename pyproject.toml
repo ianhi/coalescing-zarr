@@ -1,0 +1,68 @@
+[project]
+name = "coalescing-zarr"
+version = "0.1.0"
+description = "Store-level range coalescing for virtual Zarr stores: a bulk get_many_chunks store method plus a decode-on-arrival codec pipeline."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # VirtualiZarr ManifestStore is our base store; the Icechunk parser builds
+    # one from an Icechunk repo (array chunk refs method).
+    "virtualizarr>=2.6.2",
+    "zarr>=3.2.0",
+    "icechunk>=2.0.0",
+    "obstore>=0.10.0",
+    # JPEG/JPEG2000/etc tile decoders for the NDPI slides, registered through
+    # numcodecs so zarr decodes lazily at read time.
+    "imagecodecs>=2026.0.0",
+    "numcodecs>=0.16.0",
+    "numpy>=2.1.0",
+    "tifffile>=2024.1.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/coalescing_zarr"]
+
+[tool.uv]
+package = true
+default-groups = ["dev", "bench"]
+
+[tool.uv.sources]
+# Local icechunk build with the virtual-chunk URL-port fix (shared with the
+# sibling ../virtual project), needed for reads over the local snailmail server.
+icechunk = { path = "../icechunk-portfix/icechunk-python", editable = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "prek>=0.0.1",
+]
+# Benchmark harness only: snailmail provides a local Range server / S3 object
+# store with injectable log-normal latency and bandwidth caps.
+bench = [
+    "snailmail[s3]>=0.4.0",
+    "matplotlib>=3.8",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_ignores = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
