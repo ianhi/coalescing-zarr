@@ -156,8 +156,12 @@ class CoalescingManifestStore(ManifestStore):
         for key in keys:
             rc = self._resolve(key)
             if rc is None:
-                # Missing or uncoalescable: hand back None immediately.
-                yield key, None
+                # Uncoalescable (an inlined chunk) or genuinely missing.
+                # Delegate to the stock single-key get, which returns the
+                # inlined bytes or None. Yielding None unconditionally here would
+                # turn inlined chunks — real data — into fill values: silent
+                # corruption.
+                yield key, await self.get(key, prototype=prototype)
             else:
                 resolved.append(rc)
 
@@ -189,6 +193,13 @@ class CoalescingManifestStore(ManifestStore):
 
         tasks = [asyncio.create_task(fetch(span)) for span in spans]
         try:
+            # We stream at span granularity: a span's members are released once
+            # its (single) range GET completes, so they all land together. A
+            # future optimization could stream *within* a large span — yielding
+            # each member as soon as its bytes arrive in a chunked/streaming
+            # response, instead of waiting for the span's tail — which would help
+            # big coalesced spans. That needs a per-member-completion streaming
+            # reader; left for later.
             for completed in asyncio.as_completed(tasks):
                 span, raw = await completed
                 view = memoryview(raw)

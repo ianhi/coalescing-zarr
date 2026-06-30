@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from zarr.core.codec_pipeline import BatchedCodecPipeline
+from zarr.core.config import config as zarr_config
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -84,35 +85,60 @@ class CoalescingCodecPipeline(BatchedCodecPipeline):
         # The read path always passes StorePath byte-getters (store / key).
         first_getter = cast("StorePath", entries[0][0])
         store = getattr(first_getter, "store", None)
-        if store is None or not hasattr(store, "get_many_chunks"):
-            # Not a coalescing store — behave exactly like the stock pipeline.
+        if (
+            store is None
+            or not hasattr(store, "get_many_chunks")
+            # Sharded / partial-decode arrays drive byte_range reads that a
+            # whole-chunk CachedGetter cannot serve; let the stock pipeline
+            # handle them (coalescing targets non-sharded virtual arrays).
+            or self.supports_partial_decode
+        ):
             return await super().read(entries, out, drop_axes)
 
-        # Map each chunk key back to its (index, batch entry). Index preserves
-        # the input order that the caller maps results back by position.
-        by_key: dict[str, tuple[int, BatchEntry]] = {}
+        # Map each chunk key to the batch entries that want it. A key normally
+        # appears once, but mapping to a list keeps us correct (and avoids a
+        # dropped result) if an indexer ever emits the same chunk twice.
+        by_key: dict[str, list[tuple[int, BatchEntry]]] = {}
         for i, entry in enumerate(entries):
             key = cast("StorePath", entry[0]).path
-            by_key[key] = (i, entry)
+            by_key.setdefault(key, []).append((i, entry))
 
         prototype: BufferPrototype = entries[0][1].prototype
+        # Indices preserve the input order the caller maps results back by.
         results: list[GetResult | None] = [None] * len(entries)
 
         # Bind the parent method now; ``super()`` won't resolve inside the
-        # nested coroutine below.
+        # nested coroutine below. Bound the number of *concurrent* decodes the
+        # same way the stock pipeline does, so a large selection can't spawn an
+        # unbounded decode fan-out.
         parent_read_batch = super().read_batch
+        decode_sem = asyncio.Semaphore(int(zarr_config.get("async.concurrency")))
 
         async def decode_one(index: int, entry: BatchEntry, buf: Buffer | None) -> None:
-            # Replace only the byte-getter; reuse the rest of the batch entry.
-            single: BatchEntry = (CachedGetter(buf), *entry[1:])
-            res = await parent_read_batch([single], out, drop_axes)
+            async with decode_sem:
+                # Replace only the byte-getter; reuse the rest of the batch entry.
+                single: BatchEntry = (CachedGetter(buf), *entry[1:])
+                res = await parent_read_batch([single], out, drop_axes)
             results[index] = res[0]
 
         decode_tasks: list[asyncio.Task[None]] = []
-        async for key, buf in store.get_many_chunks(list(by_key), prototype=prototype):
-            index, entry = by_key[key]
-            decode_tasks.append(asyncio.create_task(decode_one(index, entry, buf)))
-
-        if decode_tasks:
-            await asyncio.gather(*decode_tasks)
+        chunks = store.get_many_chunks(list(by_key), prototype=prototype)
+        try:
+            async for key, buf in chunks:
+                for index, entry in by_key[key]:
+                    decode_tasks.append(
+                        asyncio.create_task(decode_one(index, entry, buf))
+                    )
+            if decode_tasks:
+                await asyncio.gather(*decode_tasks)
+        finally:
+            # On any failure (a span fetch or a sibling decode raising), stop the
+            # remaining decodes so they don't keep writing into `out` after we
+            # return/raise, and close the generator so it cancels its fetches.
+            for task in decode_tasks:
+                if not task.done():
+                    task.cancel()
+            if decode_tasks:
+                await asyncio.gather(*decode_tasks, return_exceptions=True)
+            await chunks.aclose()
         return cast("tuple[GetResult, ...]", tuple(results))

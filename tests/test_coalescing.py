@@ -93,3 +93,12 @@ def test_time_series_no_merge(time_series_store: SyntheticStore) -> None:
     # One chunk per file: no merging possible, no over-read (the no-benefit case).
     assert time_series_store.store.stats.spans == 4
     assert time_series_store.store.stats.over_read_bytes == 0
+
+
+def test_inlined_chunk_not_treated_as_missing(inlined_store: SyntheticStore) -> None:
+    # An inlined chunk is real data; coalescing must not turn it into the fill
+    # value. Coalesced read must equal both ground truth and the plain read.
+    plain = _plain(inlined_store)
+    got = _read_coalesced(inlined_store, max_gap=256 * 1024)
+    np.testing.assert_array_equal(got, inlined_store.expected)
+    np.testing.assert_array_equal(got, plain)
