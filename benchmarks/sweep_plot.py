@@ -49,12 +49,16 @@ CASE_LABELS = {
     "manifest": "manifest",
     "icechunk": "ic\n(default)",
     "icechunk-bigreq": "ic\n(12MB+)",
-    "coalesced": "coal.",
+    "coalesced": "coal.\n(16KB)",
     "coalesced-wide": "coal.\nwide",
 }
 
-# A large gap so the "wide" case bridges gaps other cases leave split — the
-# point being to make the over-read (download) trade visible on gappy patterns.
+# Realistic small gap: NDPI tiles within a row are contiguous (gap 0) but
+# consecutive rows are ~41-56 KB apart. 16 KB merges the contiguous within-row
+# runs with zero over-read, without chaining whole rows into one giant span.
+COAL_GAP = 16 * 1024
+# A large gap that bridges everything -> a single GET with maximal over-read,
+# kept to show the over-merge extreme on the download axis.
 WIDE_GAP = 64 * 1024 * 1024
 # icechunk's per-object request-split target. Default fragments a large chunk
 # read into ~ideal-sized sub-requests; setting it well above the chunk size
@@ -92,9 +96,20 @@ def tuned_icechunk_store(h: Harness, ideal_request_size: int):
 
 
 # Colours: left (time) axis = blues, right (download) axis = orange.
-C_FETCH = "#4c78a8"  # fetch/read time (wall_ms)
-C_WRAP = "#1b3a5c"  # store-build time (wrap_ms), darker shade of the same hue
+C_FETCH = "#4c78a8"  # time-to-ready (wall_ms)
 C_DOWNLOAD = "#e1812c"  # total download (MB)
+
+# Realistic per-chunk decode cost (ms), injected by the harness's decode wrapper
+# so reads aren't treated as zero-cost-to-decode. Tune to taste.
+DECODE_MS = 1.0
+
+
+def _fmt_time(ms: float) -> str:
+    return f"{ms / 1000:.1f}s" if ms >= 1000 else f"{ms:.0f}ms"
+
+
+def _fmt_mb(mb: float) -> str:
+    return f"{mb:.0f}MB" if mb >= 10 else f"{mb:.1f}MB"
 
 
 def run_sweep(source_name: str) -> tuple[list, list[str], str]:
@@ -114,7 +129,9 @@ def run_sweep(source_name: str) -> tuple[list, list[str], str]:
                 (
                     "coalesced",
                     h.plain_store(),
-                    h.wrap_with(CoalescingManifestStore),
+                    lambda _base: CoalescingManifestStore(
+                        h.group, registry=h.registry, max_gap=COAL_GAP
+                    ),
                     PIPELINE_PATH,
                 ),
                 (
@@ -126,7 +143,7 @@ def run_sweep(source_name: str) -> tuple[list, list[str], str]:
                     PIPELINE_PATH,
                 ),
             ],
-            decode_ms=(0,),
+            decode_ms=(DECODE_MS,),
             patterns=patterns,
         )
     to_json(results, out_json := Path(__file__).parent / f"sweep_{source_name}.json")
@@ -135,7 +152,8 @@ def run_sweep(source_name: str) -> tuple[list, list[str], str]:
 
 
 def plot(results: list, patterns: list[str], source_label: str, out: Path) -> None:
-    by = {(r.pattern, r.name): r for r in results if r.decode_ms == 0}
+    # One decode level per run, so index directly by (pattern, case).
+    by = {(r.pattern, r.name): r for r in results}
 
     ncols = 2 if len(patterns) >= 4 else len(patterns)
     nrows = ceil(len(patterns) / ncols)
@@ -152,8 +170,8 @@ def plot(results: list, patterns: list[str], source_label: str, out: Path) -> No
 
     for ax_t, pattern in zip(flat, patterns, strict=False):
         ax_d = ax_t.twinx()
-        wrap = [by[(pattern, c)].wrap_ms for c in CASES]
-        fetch = [by[(pattern, c)].wall_ms for c in CASES]
+        # time to ready = store build (wrap, ~0) + fetch/read (wall).
+        ready = [by[(pattern, c)].wrap_ms + by[(pattern, c)].wall_ms for c in CASES]
         mb = [by[(pattern, c)].mb for c in CASES]
 
         left = [i - width / 2 for i in x]
@@ -164,14 +182,20 @@ def plot(results: list, patterns: list[str], source_label: str, out: Path) -> No
         # better linear, where over-read magnitude is obvious.
         ax_t.set_yscale("log")
 
-        # Left axis: time-to-ready, stacked store-build (wrap) on top of
-        # fetch/read (wall). wrap is ~0 today (store construction is O(1)), so
-        # the wrap segment is an invisible sliver here, but the breakdown stays
-        # for when manifest-scan / build cost grows (e.g. the Rust port).
-        ax_t.bar(left, fetch, width, color=C_FETCH, label="fetch/read")
-        ax_t.bar(left, wrap, width, bottom=fetch, color=C_WRAP, label="store build")
-        # Right axis: total download.
-        ax_d.bar(right, mb, width, color=C_DOWNLOAD, label="download")
+        b_time = ax_t.bar(left, ready, width, color=C_FETCH)
+        b_dl = ax_d.bar(right, mb, width, color=C_DOWNLOAD)
+
+        # Headroom so the bar-top labels don't clip.
+        ax_t.set_ylim(min(ready) * 0.45, max(ready) * 3.5)
+        ax_d.set_ylim(0, max(mb) * 1.22)
+        ax_t.bar_label(
+            b_time, labels=[_fmt_time(v) for v in ready],
+            padding=2, fontsize=6.5, color=C_FETCH,
+        )
+        ax_d.bar_label(
+            b_dl, labels=[_fmt_mb(v) for v in mb],
+            padding=2, fontsize=6.5, color=C_DOWNLOAD,
+        )
 
         ax_t.set_title(pattern, fontsize=11, fontweight="bold")
         ax_t.set_xticks(list(x))
@@ -191,8 +215,7 @@ def plot(results: list, patterns: list[str], source_label: str, out: Path) -> No
         ax.set_visible(False)
 
     handles = [
-        mpatches.Patch(color=C_FETCH, label="fetch / read (wall, left log)"),
-        mpatches.Patch(color=C_WRAP, label="store build (wrap; ~0 here)"),
+        mpatches.Patch(color=C_FETCH, label="time to ready (ms, left log)"),
         mpatches.Patch(color=C_DOWNLOAD, label="download (MB, right linear)"),
     ]
     # Legend along the bottom so it never collides with the title. Short
@@ -201,17 +224,17 @@ def plot(results: list, patterns: list[str], source_label: str, out: Path) -> No
     fig.legend(
         handles=handles,
         loc="lower center",
-        ncol=3,
+        ncol=2,
         fontsize=9,
         bbox_to_anchor=(0.5, legend_y),
     )
     fig.suptitle(
         f"Coalescing vs stock ({source_label}): "
-        "time-to-ready (stacked, log) + download (linear)\n"
-        "Harness mode=45ms latency, 200 MB/s, concurrency=16, decode=0",
+        "time-to-ready (log) + download (linear)\n"
+        f"Harness mode=45ms latency, 200 MB/s, concurrency=16, decode={DECODE_MS}ms/chunk",
         fontsize=11,
     )
-    fig.savefig(out, dpi=130, bbox_inches="tight")
+    fig.savefig(out, dpi=200, bbox_inches="tight")
     print(f"wrote {out}")
 
 
