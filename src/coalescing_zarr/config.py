@@ -13,6 +13,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import zarr
+from zarr.registry import register_pipeline as _register_pipeline_class
+
+from coalescing_zarr.pipeline import CoalescingCodecPipeline
 
 # 256 KiB matches the gap used in the prior NDPI measurements; 0 would mean
 # "merge only strictly adjacent chunks" (zero over-read, more round-trips).
@@ -20,6 +23,11 @@ DEFAULT_MAX_GAP = 256 * 1024
 DEFAULT_MAX_COALESCED_BYTES: int | None = None
 
 PIPELINE_PATH = "coalescing_zarr.pipeline.CoalescingCodecPipeline"
+
+# Make the class resolvable by ``codec_pipeline.path``. Registering only adds it
+# to the registry; it does not become active until ``register_pipeline()`` (or a
+# direct ``zarr.config.set``) points the config at it.
+_register_pipeline_class(CoalescingCodecPipeline)
 
 
 @dataclass
