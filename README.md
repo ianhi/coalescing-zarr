@@ -82,44 +82,60 @@ Both entry points take the same two knobs:
 - **`max_coalesced_bytes`** (default unbounded) — hard cap on a single merged
   request, so one pathological run can't produce an enormous GET.
 
-## Requirements
+## Installation
 
-The fast path uses **Icechunk's native `get_many_chunks`**, which is **not in a
-released icechunk yet**. If it's missing, `open_zarr_coalesced` / `read_region` raise
-a `NotImplementedError` that says so. You need a forked icechunk build.
+This package needs **Icechunk's native `get_many_chunks`**, which is **not in a
+released icechunk yet** — so you install a forked icechunk build alongside it.
+(If it's missing at runtime, `open_zarr_coalesced` / `read_region` raise a
+`NotImplementedError` that says so.)
 
-**Contributors** get it automatically — `uv sync` in this repo builds the forked
-icechunk pinned in `[tool.uv.sources]`, nothing else to do.
-
-**Installing into your own environment:** install the forked icechunk first, then
-this package. Pre-built wheels (no auth, no Rust toolchain) are on the fork
-release:
-
-The release has `cp312-abi3` wheels (Python 3.12+) for macOS (x86_64/arm64),
-Linux (glibc + musl, x86_64/arm64), and Windows. Pick the one for your platform —
-e.g. Linux x86_64 (glibc):
+**Into your own environment** — install the forked icechunk wheel first, then
+this package from GitHub. Pre-built `cp312-abi3` wheels (Python 3.12+, no Rust)
+are on the fork release for macOS (x86_64/arm64), Linux glibc + musl
+(x86_64/arm64), and Windows. Pick your platform — e.g. Linux x86_64 (glibc):
 
 ```sh
+# 1. forked icechunk (find your platform's wheel with:
+#    gh release view fork-coalescing-wip --repo ianhi/icechunk)
 pip install --force-reinstall --no-deps \
   https://github.com/ianhi/icechunk/releases/download/fork-coalescing-wip/icechunk-2.1.0-cp312-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
 
-# then this package
-pip install coalescing-zarr
+# 2. this package (not on PyPI — install from GitHub)
+pip install "coalescing-zarr @ git+https://github.com/ianhi/coalescing-zarr"
 ```
 
-List or download assets for your platform with the GitHub CLI:
+**Working in this repo** — just `uv sync`. It installs the right fork wheel for
+your platform automatically (pinned in `[tool.uv.sources]`); no Rust, nothing
+else to do.
+
+**No wheel for your platform** (e.g. musl Linux): build the fork from source
+(needs a Rust toolchain), then install this package:
 
 ```sh
-gh release view fork-coalescing-wip --repo ianhi/icechunk       # see wheel filenames
-gh release download fork-coalescing-wip --repo ianhi/icechunk   # grab assets
+pip install "git+https://github.com/earth-mover/icechunk@ian/more-specific-vritual#subdirectory=icechunk-python"
+pip install "coalescing-zarr @ git+https://github.com/ianhi/coalescing-zarr"
 ```
 
-No matching wheel for your platform? Build the fork branch from source instead
-(needs a Rust toolchain): `pip install "git+https://github.com/earth-mover/icechunk@ian/more-specific-vritual#subdirectory=icechunk-python"`.
+Why the separate icechunk install: PyPI forbids git/URL dependencies, so the
+forked-icechunk requirement can't live in this package's metadata. It collapses
+to a single `pip install` once the feature ships in a released icechunk.
 
-Because PyPI forbids git/URL dependencies, this requirement can't live in the
-published wheel's metadata — hence documenting it here. It collapses to a plain
-`pip install` once the feature ships in a released icechunk.
+**On Coiled** — build a software environment with the two URLs (Coiled workers
+are Linux x86_64, Python 3.12+). List the icechunk wheel first so it pins the
+build the package resolves against:
+
+```python
+import coiled
+
+coiled.create_software_environment(
+    name="coalescing",
+    pip=[
+        "https://github.com/ianhi/icechunk/releases/download/fork-coalescing-wip/icechunk-2.1.0-cp312-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+        "coalescing-zarr @ git+https://github.com/ianhi/coalescing-zarr",
+    ],
+)
+# then: coiled.Cluster(software="coalescing", ...) / coiled notebook --software coalescing
+```
 
 ## Develop
 
