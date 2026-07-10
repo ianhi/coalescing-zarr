@@ -30,13 +30,22 @@ packages = ["src/coalescing_zarr"]
 package = true
 default-groups = ["dev"]
 
-# icechunk's native get_many_chunks is not in a released version yet, so build it
-# from the fork branch — this makes a fresh `uv sync` give a working native path.
-# Note this [tool.uv.sources] override applies only to this repo's own dev sync;
-# it is NOT baked into the built wheel (see README "Requirements"). Swap for a
-# plain version once the feature ships upstream.
+# icechunk's native get_many_chunks is not in a released version yet, so pull the
+# pre-built fork wheels (cp312-abi3) from the GitHub release — a fresh `uv sync`
+# then gets a working native path with no Rust toolchain. One URL per platform,
+# selected by marker (uv requires a marker on every entry, and can't distinguish
+# musl from glibc — so musllinux / other platforms use the source build documented
+# in the README instead). This [tool.uv.sources] override applies only to this
+# repo's own dev sync — it is NOT baked into the built wheel (see README
+# "Requirements"). Swap for a plain version once the feature ships upstream.
 [tool.uv.sources]
-icechunk = { git = "https://github.com/earth-mover/icechunk", branch = "ian/more-specific-vritual", subdirectory = "icechunk-python" }
+icechunk = [
+    { url = "https://github.com/ianhi/icechunk/releases/download/fork-coalescing-wip/icechunk-2.1.0-cp312-abi3-macosx_11_0_arm64.whl", marker = "sys_platform == 'darwin' and platform_machine == 'arm64'" },
+    { url = "https://github.com/ianhi/icechunk/releases/download/fork-coalescing-wip/icechunk-2.1.0-cp312-abi3-macosx_10_12_x86_64.whl", marker = "sys_platform == 'darwin' and platform_machine == 'x86_64'" },
+    { url = "https://github.com/ianhi/icechunk/releases/download/fork-coalescing-wip/icechunk-2.1.0-cp312-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { url = "https://github.com/ianhi/icechunk/releases/download/fork-coalescing-wip/icechunk-2.1.0-cp312-abi3-manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+    { url = "https://github.com/ianhi/icechunk/releases/download/fork-coalescing-wip/icechunk-2.1.0-cp312-abi3-win_amd64.whl", marker = "sys_platform == 'win32'" },
+]
 
 [dependency-groups]
 dev = [
