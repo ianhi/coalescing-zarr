@@ -120,9 +120,9 @@ Why the separate icechunk install: PyPI forbids git/URL dependencies, so the
 forked-icechunk requirement can't live in this package's metadata. It collapses
 to a single `pip install` once the feature ships in a released icechunk.
 
-**On Coiled** — build a software environment with the two URLs (Coiled workers
-are Linux x86_64, Python 3.12+). List the icechunk wheel first so it pins the
-build the package resolves against:
+**On Coiled** — build an explicit software environment naming the **Linux
+x86_64** icechunk wheel (Coiled workers are Linux x86_64, Python 3.12+). List
+the icechunk wheel first so it pins the build the package resolves against:
 
 ```python
 import coiled
@@ -136,6 +136,13 @@ coiled.create_software_environment(
 )
 # then: coiled.Cluster(software="coalescing", ...) / coiled notebook --software coalescing
 ```
+
+> **Don't rely on Coiled package sync from a non-Linux machine.** icechunk is a
+> compiled extension installed from a platform-specific wheel URL, so package
+> sync copies your *local* build (e.g. macOS arm64) to the Linux worker, which
+> then fails to import (`invalid ELF header`). The explicit environment above
+> names the Linux wheel, so it's the reliable path. (Package sync *from* a Linux
+> x86_64 machine matching the workers is fine.)
 
 ## Develop
 
