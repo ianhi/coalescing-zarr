@@ -5,18 +5,16 @@ description = "Store-level range coalescing for virtual Zarr stores: a bulk get_
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    # VirtualiZarr ManifestStore is our base store; the Icechunk parser builds
-    # one from an Icechunk repo (array chunk refs method).
+    # VirtualiZarr ManifestStore is the base store the Python path wraps; it also
+    # pulls xarray, which open_coalesced returns.
     "virtualizarr>=2.6.2",
+    "xarray",
     "zarr>=3.2.0",
-    "icechunk>=2.0.0",
+    # Needs a build exposing IcechunkStore.get_many_chunks (native coalescing) —
+    # not in a released icechunk yet. See README "Requirements".
+    "icechunk>=2.1.0",
     "obstore>=0.10.0",
-    # JPEG/JPEG2000/etc tile decoders for the NDPI slides, registered through
-    # numcodecs so zarr decodes lazily at read time.
-    "imagecodecs>=2026.0.0",
-    "numcodecs>=0.16.0",
     "numpy>=2.1.0",
-    "tifffile>=2024.1.1",
 ]
 
 [build-system]
@@ -28,12 +26,15 @@ packages = ["src/coalescing_zarr"]
 
 [tool.uv]
 package = true
-default-groups = ["dev", "bench"]
+default-groups = ["dev"]
 
+# icechunk's native get_many_chunks is not in a released version yet, so build it
+# from the fork branch — this makes a fresh `uv sync` give a working native path.
+# Note this [tool.uv.sources] override applies only to this repo's own dev sync;
+# it is NOT baked into the built wheel (see README "Requirements"). Swap for a
+# plain version once the feature ships upstream.
 [tool.uv.sources]
-# Local icechunk build with the virtual-chunk URL-port fix (shared with the
-# sibling ../virtual project), needed for reads over the local snailmail server.
-icechunk = { path = "../icechunk-portfix/icechunk-python", editable = true }
+icechunk = { git = "https://github.com/earth-mover/icechunk", branch = "ian/more-specific-vritual", subdirectory = "icechunk-python" }
 
 [dependency-groups]
 dev = [
@@ -42,12 +43,8 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
     "prek>=0.0.1",
-]
-# Benchmark harness only: snailmail provides a local Range server / S3 object
-# store with injectable log-normal latency and bandwidth caps.
-bench = [
-    "snailmail[s3]>=0.4.0",
-    "matplotlib>=3.8",
+    # Tests build synthetic ManifestStores and register obstores through this.
+    "obspec-utils",
 ]
 
 [tool.ruff]

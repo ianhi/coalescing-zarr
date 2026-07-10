@@ -23,7 +23,7 @@ import asyncio
 import itertools
 import os
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import zarr
@@ -41,7 +41,7 @@ __all__ = ["read_region"]
 
 
 def _normalize_window(
-    window: tuple, shape: tuple[int, ...]
+    window: tuple[Any, ...] | Any, shape: tuple[int, ...]
 ) -> tuple[tuple[int, int, bool], ...]:
     """Resolve ``window`` against ``shape`` to per-dim ``(start, stop, is_int)``.
 
@@ -89,7 +89,7 @@ def _window_coords(
 def read_region(
     session: icechunk.Session,
     arrays: list[str],
-    window: tuple,
+    window: tuple[Any, ...] | Any,
     *,
     max_gap: int = DEFAULT_MAX_GAP,
     max_coalesced_bytes: int | None = DEFAULT_MAX_COALESCED_BYTES,
@@ -133,25 +133,26 @@ def read_region(
         ``{array_path: ndarray}`` — each ndarray is the ``window`` slice of that
         array, identical to ``zarr.open_group(session.store)[path][window]``.
     """
+    from coalescing_zarr.icechunk_store import _MISSING_NATIVE_MSG
+
     store = session.store
     if not hasattr(store, "get_many_chunks"):
-        raise NotImplementedError(
-            "read_region needs icechunk.IcechunkStore.get_many_chunks (native "
-            "coalescing). Rebuild icechunk: uv sync --reinstall-package icechunk"
-        )
+        raise NotImplementedError(_MISSING_NATIVE_MSG)
 
     proto = default_buffer_prototype()
     group = zarr.open_group(store, mode="r")
 
     # Per array: resolve the window, pre-allocate its output, and record every
     # chunk coord it needs. `plans[path]` carries what assembly later needs.
-    plans: dict[str, dict] = {}
+    plans: dict[str, dict[str, Any]] = {}
     requests: list[tuple[str, tuple[int, ...]]] = []
     # request index -> (array_path, coords), so completion-order results route back.
     index_map: list[tuple[str, tuple[int, ...]]] = []
 
     for path in arrays:
         arr = group[path]
+        if not isinstance(arr, zarr.Array):
+            raise TypeError(f"{path!r} is a group, not an array")
         async_arr = arr._async_array
         meta = async_arr.metadata
         chunks = arr.chunks
@@ -200,8 +201,11 @@ def read_region(
 
     sync(_fetch())
 
-    workers = decode_workers if decode_workers is not None else min(32, os.cpu_count() or 1)
+    workers = (
+        decode_workers if decode_workers is not None else min(32, os.cpu_count() or 1)
+    )
     workers = max(1, min(workers, len(requests)))
+
     # Each chunk writes a disjoint window of its array's output, so decoding them
     # concurrently is race-free. Each group runs on its OWN worker thread with its
     # own event loop: a fresh thread has no running loop (so asyncio.run is legal
@@ -212,6 +216,7 @@ def read_region(
             for index in idxs:
                 path, coords = index_map[index]
                 await _decode_into(plans[path], coords, fetched[index], proto)
+
         asyncio.run(_run())
 
     groups = [list(range(k, len(requests), workers)) for k in range(workers)]
@@ -222,10 +227,10 @@ def read_region(
 
 
 async def _decode_into(
-    plan: dict,
+    plan: dict[str, Any],
     coords: tuple[int, ...],
     data: bytes | None,
-    proto,
+    proto: Any,
 ) -> None:
     """Decode one chunk's bytes and place it into the array's window output.
 
@@ -261,9 +266,7 @@ async def _decode_into(
     # where in the (int-axes-dropped) output it goes.
     chunk_src: list[slice] = []
     out_dst: list[slice] = []
-    for (start, stop, is_int), cs, coord in zip(
-        resolved, chunks, coords, strict=True
-    ):
+    for (start, stop, is_int), cs, coord in zip(resolved, chunks, coords, strict=True):
         chunk_lo = coord * cs
         lo = max(start, chunk_lo)
         hi = min(stop, chunk_lo + cs)

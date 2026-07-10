@@ -16,7 +16,7 @@ un-tuned client. Requires an Icechunk build exposing
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from zarr.abc.store import Store
 
@@ -33,6 +33,18 @@ if TYPE_CHECKING:
 # zarr v3 chunk keys carry a literal "c" component before the grid coords, e.g.
 # "group/array/c/0/3/1" (sep "/") or "group/array/c.0.3.1" (sep ".").
 _COORD_SPLIT = re.compile(r"[./]")
+
+# Shown when the installed icechunk lacks the native bulk getter this store needs.
+# get_many_chunks is not in a released icechunk yet (see README "Requirements").
+_MISSING_NATIVE_MSG = (
+    "This installed icechunk has no IcechunkStore.get_many_chunks, which "
+    "coalescing needs (native bulk coalesced reads). It is not in a released "
+    "icechunk yet.\n"
+    "  - Contributors: `uv sync` in this repo builds the required fork "
+    "automatically (see [tool.uv.sources] in pyproject.toml).\n"
+    "  - Otherwise: install the forked icechunk build first — see the README "
+    "'Requirements' section — then reinstall this package."
+)
 
 
 def _split_chunk_key(key: str) -> tuple[str, tuple[int, ...]] | None:
@@ -93,12 +105,7 @@ class CoalescingIcechunkStore(Store):
         Fails loudly if the running Icechunk lacks ``get_many_chunks``.
         """
         if not hasattr(session.store, "get_many_chunks"):
-            raise NotImplementedError(
-                "CoalescingIcechunkStore needs icechunk.IcechunkStore."
-                "get_many_chunks (native coalescing). Point this project's "
-                "icechunk dependency at a build that has it and rebuild "
-                "(uv sync --reinstall-package icechunk)."
-            )
+            raise NotImplementedError(_MISSING_NATIVE_MSG)
         return cls(
             session.store,
             max_gap=max_gap,
@@ -141,7 +148,9 @@ class CoalescingIcechunkStore(Store):
         if not requests:
             return
 
-        chunks = self._inner.get_many_chunks(
+        # get_many_chunks lives on the native IcechunkStore, not zarr's Store ABC
+        # (from_session verified it exists), so reach it through Any.
+        chunks = cast("Any", self._inner).get_many_chunks(
             requests,
             max_gap=max_gap,
             max_coalesced_bytes=max_coalesced_bytes,

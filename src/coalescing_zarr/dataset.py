@@ -18,7 +18,7 @@ chunks per dask task.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from coalescing_zarr.config import (
     DEFAULT_MAX_COALESCED_BYTES,
@@ -87,6 +87,7 @@ def open_coalesced(
     open_zarr_kwargs.setdefault("consolidated", False)
     register_pipeline()  # arrays capture the pipeline at open time...
     try:
-        return xr.open_zarr(store, chunks=chunks, **open_zarr_kwargs)
+        ds = xr.open_zarr(store, chunks=chunks, **open_zarr_kwargs)
+        return cast("xr.Dataset", ds)
     finally:
         use_default_pipeline()  # ...so reset immediately; other backends unaffected
