@@ -17,7 +17,7 @@ overhead the design warns about (see ``design.md`` §Open questions).
 
 from __future__ import annotations
 
-import asyncio
+import time
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
@@ -25,16 +25,15 @@ from typing import TYPE_CHECKING, Any, Literal
 from virtualizarr.manifests import ManifestArray, ManifestGroup
 from virtualizarr.manifests.store import ManifestStore, _get_deepest_group_or_array
 from virtualizarr.manifests.utils import parse_manifest_index
-from zarr.core.config import config as zarr_config
 
 from coalescing_zarr.config import DEFAULT_MAX_COALESCED_BYTES, DEFAULT_MAX_GAP
+from coalescing_zarr.fetch import stream_span_members
 from coalescing_zarr.planning import ResolvedChunk, plan_spans
 
 if TYPE_CHECKING:
+    import icechunk
     from obspec_utils.registry import ObjectStoreRegistry
     from zarr.core.buffer import Buffer, BufferPrototype
-
-    from coalescing_zarr.planning import Span
 
 # Keys ending in any of these are metadata/group documents, not data chunks.
 _METADATA_SUFFIXES = ("zarr.json", ".zattrs", ".zgroup", ".zarray", ".zmetadata")
@@ -54,6 +53,12 @@ class CoalescingStats:
     spans: int = 0
     useful_bytes: int = 0
     over_read_bytes: int = 0
+    resolve_seconds: float = 0.0
+    """Time resolving chunk keys to byte ranges (in the store backend)."""
+    coalesce_seconds: float = 0.0
+    """Time in ``plan_spans`` (our coalescing algorithm)."""
+    download_seconds: float = 0.0
+    """Pure download wall: first GET dispatched to last byte in (decode-independent)."""
 
     def reset(self) -> None:
         self.calls = 0
@@ -61,6 +66,9 @@ class CoalescingStats:
         self.spans = 0
         self.useful_bytes = 0
         self.over_read_bytes = 0
+        self.resolve_seconds = 0.0
+        self.coalesce_seconds = 0.0
+        self.download_seconds = 0.0
 
 
 class CoalescingManifestStore(ManifestStore):
@@ -85,6 +93,57 @@ class CoalescingManifestStore(ManifestStore):
         self.max_gap = max_gap
         self.max_coalesced_bytes = max_coalesced_bytes
         self.stats = CoalescingStats()
+
+    @classmethod
+    def from_manifest_store(
+        cls,
+        store: ManifestStore,
+        *,
+        max_gap: int = DEFAULT_MAX_GAP,
+        max_coalesced_bytes: int | None = DEFAULT_MAX_COALESCED_BYTES,
+    ) -> CoalescingManifestStore:
+        """Wrap an existing VirtualiZarr ``ManifestStore``, reusing its manifest.
+
+        Coalescing needs the same resolved manifest (group) and object-store
+        registry the plain store already holds; this just re-homes them under the
+        bulk ``get_many_chunks`` path with the given knobs.
+        """
+        return cls(
+            store._group,
+            registry=store._registry,
+            max_gap=max_gap,
+            max_coalesced_bytes=max_coalesced_bytes,
+        )
+
+    @classmethod
+    def from_icechunk_session(
+        cls,
+        session: icechunk.Session,
+        registry: ObjectStoreRegistry[Any],
+        *,
+        native_chunks_prefix: str,
+        group: str | None = None,
+        skip_variables: Any = None,
+        max_gap: int = DEFAULT_MAX_GAP,
+        max_coalesced_bytes: int | None = DEFAULT_MAX_COALESCED_BYTES,
+    ) -> CoalescingManifestStore:
+        """Build a coalescing store from an open Icechunk ``Session``.
+
+        Parses the session's manifest into a ``ManifestStore`` (via VirtualiZarr's
+        ``IcechunkParser``) and wraps it. ``registry`` must hold obstores for the
+        *backing* data the manifest points at (e.g. the source S3 bucket) — that
+        is what coalescing actually fetches, so it cannot be inferred from the
+        session. ``native_chunks_prefix`` locates Icechunk's own (non-virtual)
+        chunks, per the ``IcechunkParser`` contract.
+        """
+        from virtualizarr.parsers import IcechunkParser
+
+        ms = IcechunkParser(group=group, skip_variables=skip_variables).parse_session(
+            session, registry=registry, native_chunks_prefix=native_chunks_prefix
+        )
+        return cls.from_manifest_store(
+            ms, max_gap=max_gap, max_coalesced_bytes=max_coalesced_bytes
+        )
 
     def _resolve(self, key: str) -> ResolvedChunk | None:
         """Resolve a chunk key to a byte range, without fetching.
@@ -165,52 +224,20 @@ class CoalescingManifestStore(ManifestStore):
             else:
                 resolved.append(rc)
 
+        t0 = time.perf_counter()
         spans = plan_spans(
             resolved, max_gap=max_gap, max_coalesced_bytes=max_coalesced_bytes
         )
+        self.stats.coalesce_seconds += time.perf_counter() - t0
         self.stats.spans += len(spans)
         for span in spans:
             useful = span.useful_bytes
             self.stats.useful_bytes += useful
             self.stats.over_read_bytes += span.nbytes - useful
 
-        if not spans:
-            return
-
-        # Bound fetch concurrency by the same knob zarr uses for its per-chunk
-        # fan-out, so coalescing never *reduces* concurrency below the baseline.
-        concurrency = int(zarr_config.get("async.concurrency"))
-        sem = asyncio.Semaphore(concurrency)
-
-        async def fetch(span: Span) -> tuple[Span, Any]:
-            async with sem:
-                # obstore returns a zero-copy buffer-protocol object; we slice
-                # views out of it below without ever copying the span bytes.
-                raw = await span.store.get_range_async(
-                    span.path, start=span.start, end=span.end
-                )
-            return span, raw
-
-        tasks = [asyncio.create_task(fetch(span)) for span in spans]
-        try:
-            # We stream at span granularity: a span's members are released once
-            # its (single) range GET completes, so they all land together. A
-            # future optimization could stream *within* a large span — yielding
-            # each member as soon as its bytes arrive in a chunked/streaming
-            # response, instead of waiting for the span's tail — which would help
-            # big coalesced spans. That needs a per-member-completion streaming
-            # reader; left for later.
-            for completed in asyncio.as_completed(tasks):
-                span, raw = await completed
-                view = memoryview(raw)
-                for member in span.members:
-                    rel = member.offset - span.start
-                    # from_bytes -> np.frombuffer wraps the view without copying;
-                    # the returned buffer keeps ``raw`` alive until it is decoded
-                    # (which happens immediately downstream), so this is safe.
-                    chunk_view = view[rel : rel + member.length]
-                    yield member.key, prototype.buffer.from_bytes(chunk_view)
-        finally:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
+        # Fetch spans concurrently and stream members in completion order (shared
+        # with the Icechunk-native store — see ``fetch.stream_span_members``).
+        async for key, buf in stream_span_members(
+            spans, prototype=prototype, stats=self.stats
+        ):
+            yield key, buf

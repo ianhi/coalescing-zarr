@@ -7,4 +7,18 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+wheels/
 .ipynb_checkpoints/
+
+# editor / OS
+.DS_Store
+.claude/
+
+# jupyter live-collaboration state
+.jupyter/
+*.jupyter_ystore.db
+
+# benchmark build + result artifacts
+benchmarks/_build/
+benchmarks/goes_results.jsonl
+*.log
