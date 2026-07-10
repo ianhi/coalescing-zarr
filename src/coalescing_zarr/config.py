@@ -1,11 +1,9 @@
-"""Default coalescing knobs and pipeline registration.
+"""Coalescing knob defaults and pipeline registration.
 
-The two knobs are intentionally minimal for the MVP. ``max_gap`` is the lever
-the design calls out as *two* tensions at once (round-trips vs over-read, and
-round-trips vs pipelineability); ``max_coalesced_bytes`` is a safety cap. These
-are only *defaults* — actual policy lives per-store on
-:class:`~coalescing_zarr.store.CoalescingManifestStore`, so a future cost model
-slots in there (or as an injected planner) rather than as a global swap.
+The knob defaults and their zarr-config keys live in
+:mod:`coalescing_zarr.pipeline` (a leaf module, so the pipeline can read them
+without importing this module, which registers the pipeline class). They are
+re-exported here for the public ``coalescing_zarr.config`` surface.
 """
 
 from __future__ import annotations
@@ -13,17 +11,28 @@ from __future__ import annotations
 import zarr
 from zarr.registry import register_pipeline as _register_pipeline_class
 
-from coalescing_zarr.pipeline import CoalescingCodecPipeline
+from coalescing_zarr.pipeline import (
+    DEFAULT_MAX_COALESCED_BYTES,
+    DEFAULT_MAX_GAP,
+    MAX_COALESCED_BYTES_KEY,
+    MAX_GAP_KEY,
+    CoalescingCodecPipeline,
+)
 
-# 256 KiB matches the gap used in the prior NDPI measurements; 0 would mean
-# "merge only strictly adjacent chunks" (zero over-read, more round-trips).
-DEFAULT_MAX_GAP = 256 * 1024
-DEFAULT_MAX_COALESCED_BYTES: int | None = None
+__all__ = [
+    "DEFAULT_MAX_COALESCED_BYTES",
+    "DEFAULT_MAX_GAP",
+    "MAX_COALESCED_BYTES_KEY",
+    "MAX_GAP_KEY",
+    "PIPELINE_PATH",
+    "register_pipeline",
+    "use_default_pipeline",
+]
 
 PIPELINE_PATH = "coalescing_zarr.pipeline.CoalescingCodecPipeline"
 
 # Make the class resolvable by ``codec_pipeline.path``. Registering only adds it
-# to the registry; it does not become active until ``register_pipeline()`` (or a
+# to the registry; it becomes active only once ``register_pipeline()`` (or a
 # direct ``zarr.config.set``) points the config at it.
 _register_pipeline_class(CoalescingCodecPipeline)
 

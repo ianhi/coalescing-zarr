@@ -30,23 +30,34 @@ commonly an ~8× speedup over a stock read, from one line.
 
 ```python
 import icechunk
-from coalescing_zarr import open_coalesced
+from coalescing_zarr import open_zarr_coalesced
 
 repo = icechunk.Repository.open(storage)
 session = repo.readonly_session("main")
 
 # A normal xarray Dataset — but reads go through the coalescing pipeline.
-ds = open_coalesced(session)
+ds = open_zarr_coalesced(session)
 region = ds["temperature"].sel(time="2024-01-01").compute()
 ```
 
-`open_coalesced` returns an ordinary `xarray.Dataset`; everything downstream
-(`.sel`, `.compute`, plotting) is unchanged. It defaults to eager reads
-(`chunks=None`) so each array read is one bulk, range-coalesced request. Pass
-`chunks={"time": N}` to stay lazy/dask-backed while still batching many chunks
-per task. Avoid the plain xarray default (`chunks={}`) — that is one dask task
-per native chunk, which reintroduces the per-chunk overhead and prevents
-coalescing.
+`open_zarr_coalesced` returns an ordinary `xarray.Dataset` over the session's
+own store (no wrapper) — everything downstream (`.sel`, `.compute`, plotting) is
+unchanged. It defaults to eager reads (`chunks=None`) so each array read is one
+bulk, range-coalesced request. Pass `chunks={"time": N}` to stay lazy/dask-backed
+while still batching many chunks per task. Avoid the plain xarray default
+(`chunks={}`) — that is one dask task per native chunk, which reintroduces the
+per-chunk overhead and prevents coalescing.
+
+### Why a dedicated opener?
+
+`open_zarr_coalesced` is `xarray.open_zarr` with two things arranged for you: the
+coalescing codec pipeline is active for the open, and **chunking is set so a read
+spans many chunks**. That second part is the reason it exists — a plain
+`xarray.open_zarr(session.store)` makes the array dask-backed at its native chunk
+grid, i.e. one task per chunk, so the pipeline only ever sees a single chunk per
+read and can't coalesce (and the per-chunk overhead this targets returns).
+Coalescing across the native grid without an explicit coarse `chunks=` is a known
+limitation and future work; for now, open through this function.
 
 ### Reading across arrays in one call
 
@@ -74,7 +85,7 @@ Both entry points take the same two knobs:
 ## Requirements
 
 The fast path uses **Icechunk's native `get_many_chunks`**, which is **not in a
-released icechunk yet**. If it's missing, `open_coalesced` / `read_region` raise
+released icechunk yet**. If it's missing, `open_zarr_coalesced` / `read_region` raise
 a `NotImplementedError` that says so. You need a forked icechunk build.
 
 **Contributors** get it automatically — `uv sync` in this repo builds the forked

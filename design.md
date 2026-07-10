@@ -57,16 +57,24 @@ bandwidth**, not GET count.
 - **Fetch / decode** are separate stages (`fetch.py`, `pipeline.py`) so the
   overlap strategy can change without touching the planner.
 
-## Two implementations
+## Two store backends behind one pipeline
 
-- **`CoalescingIcechunkStore`** (the headline) delegates to Icechunk's *native*
-  `get_many_chunks`, which resolves + coalesces + fetches through Icechunk's own
-  client, across virtual and native chunks. `open_coalesced()` wraps this into an
-  xarray `Dataset`; `read_region()` does a single cross-array bulk read.
+The pipeline supports two ways to satisfy a bulk read, chosen by store type. The
+seam is deliberately in the pipeline, not in a store the caller must construct —
+so a plain `session.store` reads through coalescing with no wrapper.
+
+- **Native Icechunk (the headline).** Icechunk's *native* `get_many_chunks`
+  resolves + coalesces + fetches through Icechunk's own client, across virtual
+  and native chunks. `icechunk_native.py` is the thin translation (chunk keys ⇄
+  `(array_path, coords)`, native `(index, bytes)` ⇄ `(key, buffer)`); the
+  pipeline detects a native store and calls it directly. `open_zarr_coalesced()`
+  arranges the pipeline + chunking for an xarray `Dataset`; `read_region()` does
+  a single cross-array bulk read.
 - **`CoalescingManifestStore`** is the pure-Python reference path: it resolves
-  keys against a VirtualiZarr `ManifestStore` and fetches spans through obstore.
-  Useful for testing the planner and pipeline against byte-exact synthetic data
-  without a custom icechunk. It is the model the native path stands in for.
+  keys against a VirtualiZarr `ManifestStore` and fetches spans through obstore,
+  exposing a `(keys, prototype) → (key, buffer)` `get_many_chunks`. Useful for
+  testing the planner and pipeline against byte-exact synthetic data without a
+  custom icechunk. It is the model the native path stands in for.
 
 ## Scope and direction
 

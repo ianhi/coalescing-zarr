@@ -24,10 +24,15 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from zarr.core.codec_pipeline import BatchedCodecPipeline
 from zarr.core.config import config as zarr_config
+
+from coalescing_zarr.icechunk_native import (
+    is_native_icechunk_store,
+    stream_icechunk_chunks,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -43,6 +48,17 @@ if TYPE_CHECKING:
         "ByteGetter", "ArraySpec", "SelectorTuple", "SelectorTuple", bool
     ]
     BatchInfo = Iterable[BatchEntry]
+
+# Coalescing knobs: defaults + the zarr-config keys they are read from. They live
+# in this leaf module so both `config.py` and this pipeline can import them
+# without a cycle (config.py registers this pipeline class, so it can't be
+# imported here). ``max_gap`` is unwanted bytes tolerated between two chunks
+# before their range GETs merge; ``max_coalesced_bytes`` caps one merged request.
+# 256 KiB matches the gap used in the prior NDPI measurements.
+DEFAULT_MAX_GAP = 256 * 1024
+DEFAULT_MAX_COALESCED_BYTES: int | None = None
+MAX_GAP_KEY = "coalescing.max_gap"
+MAX_COALESCED_BYTES_KEY = "coalescing.max_coalesced_bytes"
 
 
 @dataclass
@@ -72,6 +88,19 @@ class CachedGetter:
 class CoalescingCodecPipeline(BatchedCodecPipeline):
     """A codec pipeline that fetches via ``get_many_chunks`` and decodes on arrival."""
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # Snapshot the coalescing knobs from config at construction. zarr builds
+        # the pipeline instance once, when the array is opened (verified) — so
+        # an opener that sets these in config only for the open window (see
+        # ``open_zarr_coalesced``) still binds them here, and a later config
+        # reset does not lose them. Only the native-Icechunk path uses these;
+        # the pure-Python store carries its own per-instance knobs.
+        max_gap = zarr_config.get(MAX_GAP_KEY, DEFAULT_MAX_GAP)
+        mcb = zarr_config.get(MAX_COALESCED_BYTES_KEY, DEFAULT_MAX_COALESCED_BYTES)
+        self.max_gap = int(max_gap)
+        self.max_coalesced_bytes = None if mcb is None else int(mcb)
+
     async def read(
         self,
         batch_info: BatchInfo,
@@ -85,9 +114,13 @@ class CoalescingCodecPipeline(BatchedCodecPipeline):
         # The read path always passes StorePath byte-getters (store / key).
         first_getter = cast("StorePath", entries[0][0])
         store = getattr(first_getter, "store", None)
+        # Two bulk paths: a native Icechunk store (we adapt its native
+        # get_many_chunks here) and the pure-Python CoalescingManifestStore
+        # (which exposes a (keys, prototype) -> (key, buffer) get_many_chunks).
+        native = store is not None and is_native_icechunk_store(store)
+        generic = store is not None and not native and hasattr(store, "get_many_chunks")
         if (
-            store is None
-            or not hasattr(store, "get_many_chunks")
+            (not native and not generic)
             # Sharded / partial-decode arrays drive byte_range reads that a
             # whole-chunk CachedGetter cannot serve; let the stock pipeline
             # handle them (coalescing targets non-sharded virtual arrays).
@@ -103,6 +136,7 @@ class CoalescingCodecPipeline(BatchedCodecPipeline):
             key = cast("StorePath", entry[0]).path
             by_key.setdefault(key, []).append((i, entry))
 
+        assert store is not None  # guaranteed by the native/generic guard above
         prototype: BufferPrototype = entries[0][1].prototype
         # Indices preserve the input order the caller maps results back by.
         results: list[GetResult | None] = [None] * len(entries)
@@ -122,7 +156,19 @@ class CoalescingCodecPipeline(BatchedCodecPipeline):
             results[index] = res[0]
 
         decode_tasks: list[asyncio.Task[None]] = []
-        chunks = store.get_many_chunks(list(by_key), prototype=prototype)
+        if native:
+            # Adapt Icechunk's native (array_path, coords) -> (index, bytes)
+            # getter to the (key, buffer) stream this pipeline decodes from.
+            chunks = stream_icechunk_chunks(
+                store,
+                list(by_key),
+                prototype=prototype,
+                max_gap=self.max_gap,
+                max_coalesced_bytes=self.max_coalesced_bytes,
+            )
+        else:
+            # Pure-Python store: it carries its own per-instance knobs.
+            chunks = store.get_many_chunks(list(by_key), prototype=prototype)
         try:
             async for key, buf in chunks:
                 for index, entry in by_key[key]:
@@ -140,5 +186,7 @@ class CoalescingCodecPipeline(BatchedCodecPipeline):
                     task.cancel()
             if decode_tasks:
                 await asyncio.gather(*decode_tasks, return_exceptions=True)
-            await chunks.aclose()
+            aclose = getattr(chunks, "aclose", None)
+            if aclose is not None:
+                await aclose()
         return cast("tuple[GetResult, ...]", tuple(results))

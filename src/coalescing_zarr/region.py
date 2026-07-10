@@ -109,8 +109,8 @@ def read_region(
     ----------
     session
         An open ``icechunk.Session`` whose store exposes the native
-        ``get_many_chunks`` (see :class:`~coalescing_zarr.icechunk_store.
-        CoalescingIcechunkStore`).
+        ``get_many_chunks`` (see the README "Requirements": needs a forked
+        icechunk build).
     arrays
         Array paths within the session's root group, e.g.
         ``["grp/CMI_C01", "grp/CMI_C02"]``. All are indexed with the same
@@ -133,7 +133,7 @@ def read_region(
         ``{array_path: ndarray}`` — each ndarray is the ``window`` slice of that
         array, identical to ``zarr.open_group(session.store)[path][window]``.
     """
-    from coalescing_zarr.icechunk_store import _MISSING_NATIVE_MSG
+    from coalescing_zarr.icechunk_native import _MISSING_NATIVE_MSG
 
     store = session.store
     if not hasattr(store, "get_many_chunks"):

@@ -1,41 +1,52 @@
-"""``open_coalesced`` — open an Icechunk session as an xarray Dataset that reads
-through the coalescing pipeline, with a bulk-friendly default so the fast path
-fires without the caller knowing anything about coalescing or chunking.
+"""``open_zarr_coalesced`` — open an Icechunk session as an xarray Dataset that
+reads through the coalescing pipeline, with a bulk-friendly chunking default so
+the fast path fires without the caller knowing anything about coalescing.
 
-Why this exists: reading an Icechunk array through xarray the *default* way makes
-the array dask-backed at its native chunk grid, so a read is split into one task
-per chunk. For arrays with many small chunks (e.g. Met Office HDF5 at (1,128,128)
--> 6000 chunks) that per-chunk dask/zarr orchestration dominates the wall time
-(~25 s for a full read where the actual download+decode is ~2 s), and the
-coalescing pipeline never sees more than one chunk at a time so it can't coalesce.
+This is ``xarray.open_zarr`` with two things arranged for you:
 
-Opening so a single read spans many chunks fixes both: the coalescing pipeline
-gets the whole request at once (one bulk ``get_many_chunks``) and there is no
-per-chunk task overhead. ``chunks=None`` (the default here) reads eagerly in one
-shot; pass ``chunks={"time": N}`` for lazy/out-of-core reads that still batch many
-chunks per dask task.
+1. **The coalescing codec pipeline is active** for the open. Reads through the
+   returned Dataset call ``get_many_chunks`` on the (native Icechunk) store, so a
+   read is fetched as one bulk, range-coalesced request and decoded on arrival.
+   No store wrapper is needed — the pipeline detects a native Icechunk store and
+   adapts to its native getter directly.
+2. **Chunking is set so a read spans many chunks.** This is the part
+   ``xarray.open_zarr`` cannot do for you, and the reason this function exists:
+   the default xarray open makes an array dask-backed *at its native chunk grid*,
+   so a read is one dask task per chunk — the coalescing pipeline then sees only
+   one chunk at a time and can't coalesce, and the per-chunk task overhead (the
+   very cost this targets) returns. ``chunks=None`` (the default here) reads
+   eagerly in one shot; ``chunks={"time": N}`` stays lazy/dask-backed while
+   batching many chunks per task.
+
+Limitation: a plain ``xarray.open_zarr(session.store)`` will *not* coalesce even
+with the pipeline registered globally, for the chunking reason above. Fixing that
+(coalescing across the native chunk grid without an explicit coarse ``chunks``)
+is future work; for now, open through this function.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
-from coalescing_zarr.config import (
+import zarr
+
+from coalescing_zarr.config import register_pipeline, use_default_pipeline
+from coalescing_zarr.icechunk_native import _MISSING_NATIVE_MSG
+from coalescing_zarr.pipeline import (
     DEFAULT_MAX_COALESCED_BYTES,
     DEFAULT_MAX_GAP,
-    register_pipeline,
-    use_default_pipeline,
+    MAX_COALESCED_BYTES_KEY,
+    MAX_GAP_KEY,
 )
-from coalescing_zarr.icechunk_store import CoalescingIcechunkStore
 
 if TYPE_CHECKING:
     import icechunk
     import xarray as xr
 
-__all__ = ["open_coalesced"]
+__all__ = ["open_zarr_coalesced"]
 
 
-def open_coalesced(
+def open_zarr_coalesced(
     session: icechunk.Session,
     *,
     chunks: Any = None,
@@ -43,30 +54,29 @@ def open_coalesced(
     max_coalesced_bytes: int | None = DEFAULT_MAX_COALESCED_BYTES,
     **open_zarr_kwargs: Any,
 ) -> xr.Dataset:
-    """Open an Icechunk ``session`` as an xarray ``Dataset`` via the coalescing store.
+    """Open an Icechunk ``session`` as a coalescing-backed xarray ``Dataset``.
 
-    Reads go through :class:`~coalescing_zarr.icechunk_store.CoalescingIcechunkStore`
-    and the :class:`~coalescing_zarr.pipeline.CoalescingCodecPipeline`, so a single
-    array read is fetched as one bulk, range-coalesced ``get_many_chunks`` call and
-    decoded on arrival. Ordinary xarray then works unchanged
-    (``ds[var].sel(...).compute()``).
+    Ordinary xarray then works unchanged (``ds[var].sel(...).compute()``); reads
+    go through the coalescing codec pipeline over the session's native store.
 
     Parameters
     ----------
     session
-        An open ``icechunk.Session`` (e.g. ``repo.readonly_session("main")``) whose
-        store exposes the native ``get_many_chunks``.
+        An open ``icechunk.Session`` (e.g. ``repo.readonly_session("main")``)
+        whose store exposes the native ``get_many_chunks`` (see the README
+        "Requirements": this needs a forked icechunk build).
     chunks
-        Passed to :func:`xarray.open_zarr`. **Default ``None``** reads eagerly (numpy
-        backed) so each read is one bulk request — the fast path. Use
-        ``chunks={"time": N}`` (or any block larger than the native chunk grid) to
-        stay lazy/dask-backed while still batching many chunks per task. Avoid
-        ``chunks={}`` / the xarray default: that is one dask task per native chunk,
-        which reintroduces the per-chunk overhead and prevents coalescing.
+        Passed to :func:`xarray.open_zarr`. **Default ``None``** reads eagerly
+        (numpy backed) so each read is one bulk request — the fast path. Use
+        ``chunks={"time": N}`` (a block larger than the native chunk grid) to stay
+        lazy/dask-backed while still batching many chunks per task. Avoid
+        ``chunks={}`` / the xarray default: one dask task per native chunk, which
+        reintroduces the per-chunk overhead and prevents coalescing.
     max_gap, max_coalesced_bytes
-        Coalescing policy (see ``CoalescingIcechunkStore``): ``max_gap`` is the most
-        unwanted bytes tolerated between two chunks before merging their range GETs;
-        ``max_coalesced_bytes`` caps one merged request.
+        Coalescing policy. ``max_gap`` is the most unwanted bytes tolerated
+        between two chunks before merging their range GETs; ``max_coalesced_bytes``
+        caps one merged request. They are bound into the pipeline at open time
+        (via zarr config) and captured by the Dataset's arrays.
     **open_zarr_kwargs
         Forwarded to :func:`xarray.open_zarr` (``group``, ``mask_and_scale``, ...).
         ``zarr_format=3`` and ``consolidated=False`` are set unless overridden.
@@ -74,20 +84,28 @@ def open_coalesced(
     Returns
     -------
     xarray.Dataset
-        Backed by the coalescing store. The arrays capture the coalescing pipeline
-        at open time, so the global pipeline is reset before returning (other stores
-        opened later are unaffected).
+        Backed by the coalescing pipeline. The arrays capture the pipeline (and
+        the knobs) at open time, so the global pipeline is reset before returning
+        — other stores opened later are unaffected.
     """
     import xarray as xr
 
-    store = CoalescingIcechunkStore.from_session(
-        session, max_gap=max_gap, max_coalesced_bytes=max_coalesced_bytes
-    )
+    store = session.store
+    if not hasattr(store, "get_many_chunks"):
+        raise NotImplementedError(_MISSING_NATIVE_MSG)
+
     open_zarr_kwargs.setdefault("zarr_format", 3)
     open_zarr_kwargs.setdefault("consolidated", False)
-    register_pipeline()  # arrays capture the pipeline at open time...
-    try:
-        ds = xr.open_zarr(store, chunks=chunks, **open_zarr_kwargs)
-        return cast("xr.Dataset", ds)
-    finally:
-        use_default_pipeline()  # ...so reset immediately; other backends unaffected
+
+    # Set the knobs in config only for the open window: the pipeline instance
+    # zarr builds for each array snapshots them in its __init__, so the reset
+    # afterwards doesn't lose them, and other backends stay unaffected.
+    with zarr.config.set(
+        {MAX_GAP_KEY: max_gap, MAX_COALESCED_BYTES_KEY: max_coalesced_bytes}
+    ):
+        register_pipeline()  # arrays capture the pipeline at open time...
+        try:
+            ds = xr.open_zarr(store, chunks=chunks, **open_zarr_kwargs)
+        finally:
+            use_default_pipeline()  # ...so reset immediately
+    return cast("xr.Dataset", ds)
