@@ -95,11 +95,13 @@ icechunk pinned in `[tool.uv.sources]`, nothing else to do.
 this package. Pre-built wheels (no auth, no Rust toolchain) are on the fork
 release:
 
+The release has `cp312-abi3` wheels (Python 3.12+) for macOS (x86_64/arm64),
+Linux (glibc + musl, x86_64/arm64), and Windows. Pick the one for your platform —
+e.g. Linux x86_64 (glibc):
+
 ```sh
-# Match your platform: manylinux for glibc Linux, musllinux for Alpine, and the
-# right arch. Example — Linux x86_64, Python 3.12+ (abi3):
 pip install --force-reinstall --no-deps \
-  https://github.com/ianhi/icechunk/releases/download/fork-coalescing-wip/icechunk-2.1.0-cp312-abi3-manylinux_2_28_x86_64.whl
+  https://github.com/ianhi/icechunk/releases/download/fork-coalescing-wip/icechunk-2.1.0-cp312-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
 
 # then this package
 pip install coalescing-zarr
