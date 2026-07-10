@@ -1,16 +1,30 @@
 # coalescing-zarr
 
-Store-level range coalescing for virtual Zarr stores.
+Store-level range coalescing for **virtualized** Zarr data.
 
-Reading a region of a virtual array fetches **one chunk per request** — correct,
-but latency-bound when many small chunks live in the same backing file. This
-package coalesces those fetches into a few larger range requests, trading a
-little over-read for far fewer round-trips, while preserving zarr's
-fetch↔decode overlap: bytes stream back in completion order and each chunk is
-decoded the moment it arrives.
+The use case is virtualization: an Icechunk repo whose chunks are virtual
+references into original archive files (HDF5 / NetCDF / TIFF), where one array is
+often thousands of small chunks packed into a single backing object. zarr's read
+path fetches **one chunk per request** — correct, but latency-bound when the
+chunks are small and co-located.
 
-On overhead-bound reads (e.g. Met Office HDF5 with thousands of tiny chunks) this
-is commonly an ~8× speedup over a stock read, from one line.
+This package moves the fetch decision down to the store, where the layout is
+known. It works at three levels:
+
+- **Codec pipeline (this package).** Installs a zarr `CodecPipeline` that hands
+  the store the *whole* set of chunk keys for a read at once — calling
+  `get_many_chunks` on the store — instead of one `get` per chunk. It then
+  decodes each chunk the moment its bytes arrive.
+- **Store (Icechunk).** Seeing the whole batch, the store can optimize how it
+  fetches from storage: chunks that sit near each other in the same backing
+  object are coalesced into a few large range requests — the optimization zarr's
+  one-chunk-at-a-time path structurally can't express.
+- **Storage.** Ends up serving a handful of large range GETs instead of thousands
+  of tiny ones, trading a little over-read for far fewer round-trips.
+
+Bytes stream back in completion order, so fetch↔decode overlap is preserved. On
+overhead-bound reads (e.g. Met Office HDF5 with thousands of tiny chunks) this is
+commonly an ~8× speedup over a stock read, from one line.
 
 ## Quickstart
 
