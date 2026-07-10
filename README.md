@@ -120,29 +120,40 @@ Why the separate icechunk install: PyPI forbids git/URL dependencies, so the
 forked-icechunk requirement can't live in this package's metadata. It collapses
 to a single `pip install` once the feature ships in a released icechunk.
 
-**On Coiled** — build an explicit software environment naming the **Linux
-x86_64** icechunk wheel (Coiled workers are Linux x86_64, Python 3.12+). List
-the icechunk wheel first so it pins the build the package resolves against:
+**On Coiled** — icechunk is a compiled extension, so its **Linux x86_64** build
+must come from a base software environment; package sync then layers your local
+pure-Python code (coalescing-zarr and any edits) on top. Build the base once with
+just the icechunk wheel:
 
 ```python
 import coiled
 
 coiled.create_software_environment(
-    name="coalescing",
-    pip=[
-        "https://github.com/ianhi/icechunk/releases/download/fork-coalescing-wip/icechunk-2.1.0-cp312-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
-        "coalescing-zarr @ git+https://github.com/ianhi/coalescing-zarr",
-    ],
+    name="icechunk-coalescing",
+    pip=["https://github.com/ianhi/icechunk/releases/download/fork-coalescing-wip/icechunk-2.1.0-cp312-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"],
 )
-# then: coiled.Cluster(software="coalescing", ...) / coiled notebook --software coalescing
 ```
 
-> **Don't rely on Coiled package sync from a non-Linux machine.** icechunk is a
-> compiled extension installed from a platform-specific wheel URL, so package
-> sync copies your *local* build (e.g. macOS arm64) to the Linux worker, which
-> then fails to import (`invalid ELF header`). The explicit environment above
-> names the Linux wheel, so it's the reliable path. (Package sync *from* a Linux
-> x86_64 machine matching the workers is fine.)
+Then launch with `--sync` against that base — package sync adds coalescing-zarr
+and leaves icechunk alone (the base already has the matching 2.1.0), so your
+local edits show up without rebuilding the env:
+
+```sh
+coiled notebook start --sync --software icechunk-coalescing --vm-type c7a.medium
+# clusters: coiled.Cluster(software="icechunk-coalescing", ...) with package sync
+```
+
+Prefer not to manage a base env? Bake everything into one senv (add
+`"coalescing-zarr @ git+https://github.com/ianhi/coalescing-zarr"` to the `pip`
+list above) and launch with `--software icechunk-coalescing` and no `--sync` —
+simpler, but you rebuild on every code change.
+
+> **Don't use _bare_ package sync from a non-Linux machine.** icechunk's compiled
+> `.so` is platform-specific, so sync alone ships your local (e.g. macOS arm64)
+> build to the Linux worker and it fails to import (`invalid ELF header`).
+> Providing the Linux icechunk via the base software environment above is what
+> makes `--sync` safe. (Bare package sync *from* a matching Linux x86_64 machine
+> is fine.)
 
 ## Develop
 
