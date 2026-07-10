@@ -3,6 +3,8 @@ name = "coalescing-zarr"
 version = "0.1.0"
 description = "Store-level range coalescing for virtual Zarr stores: a bulk get_many_chunks store method plus a decode-on-arrival codec pipeline."
 readme = "README.md"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     # VirtualiZarr ManifestStore is the base store the Python path wraps; it also

@@ -61,19 +61,38 @@ Both entry points take the same two knobs:
 
 The fast path uses **Icechunk's native `get_many_chunks`**, which is **not in a
 released icechunk yet**. If it's missing, `open_coalesced` / `read_region` raise
-a `NotImplementedError` that says so.
+a `NotImplementedError` that says so. You need a forked icechunk build.
 
-- **Contributors** get the required build automatically: `uv sync` in this repo
-  builds the forked icechunk pinned in `[tool.uv.sources]`. Nothing else to do.
-- **Installing into your own environment:** install the forked icechunk build
-  first, then this package. Because PyPI forbids git/URL dependencies, this
-  requirement cannot be expressed in the published wheel's metadata — it is
-  documented here instead. (A pre-built release of the fork is the intended path;
-  until then, build the fork branch `ian/more-specific-vritual` of
-  `earth-mover/icechunk`.)
+**Contributors** get it automatically — `uv sync` in this repo builds the forked
+icechunk pinned in `[tool.uv.sources]`, nothing else to do.
 
-This will collapse to a plain `pip install` against a released icechunk once the
-feature ships upstream.
+**Installing into your own environment:** install the forked icechunk first, then
+this package. Pre-built wheels (no auth, no Rust toolchain) are on the fork
+release:
+
+```sh
+# Match your platform: manylinux for glibc Linux, musllinux for Alpine, and the
+# right arch. Example — Linux x86_64, Python 3.12+ (abi3):
+pip install --force-reinstall --no-deps \
+  https://github.com/ianhi/icechunk/releases/download/fork-coalescing-wip/icechunk-2.1.0-cp312-abi3-manylinux_2_28_x86_64.whl
+
+# then this package
+pip install coalescing-zarr
+```
+
+List or download assets for your platform with the GitHub CLI:
+
+```sh
+gh release view fork-coalescing-wip --repo ianhi/icechunk       # see wheel filenames
+gh release download fork-coalescing-wip --repo ianhi/icechunk   # grab assets
+```
+
+No matching wheel for your platform? Build the fork branch from source instead
+(needs a Rust toolchain): `pip install "git+https://github.com/earth-mover/icechunk@ian/more-specific-vritual#subdirectory=icechunk-python"`.
+
+Because PyPI forbids git/URL dependencies, this requirement can't live in the
+published wheel's metadata — hence documenting it here. It collapses to a plain
+`pip install` once the feature ships in a released icechunk.
 
 ## Develop
 
