@@ -14,6 +14,7 @@ import zarr
 from conftest import SyntheticStore
 
 import coalescing_zarr
+import coalescing_zarr.manifest_store
 from coalescing_zarr.config import PIPELINE_PATH
 
 
@@ -43,7 +44,8 @@ def _plain(synth: SyntheticStore) -> np.ndarray:
 
 
 def test_import_surface() -> None:
-    assert coalescing_zarr.CoalescingManifestStore is not None
+    assert coalescing_zarr.open_zarr_coalesced is not None
+    assert coalescing_zarr.manifest_store.CoalescingManifestStore is not None
 
 
 def test_byte_identical_adjacent(adjacent_store: SyntheticStore) -> None:

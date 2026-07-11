@@ -49,12 +49,13 @@ bandwidth**, not GET count.
 
 ## Seams built to evolve
 
-- **`plan_spans`** (`planning.py`) is a pure, I/O-free function:
+- **`plan_spans`** (`manifest_store/planning.py`) is a pure, I/O-free function:
   `resolved_chunks + knobs -> list[Span]`. Group by file, sort by offset,
   gap-merge. Trivially unit-testable and swappable for a smarter cost model.
   Cheap early-outs fall out of the structure for free — with <2 chunks, or one
   chunk per file (the time-series worst case), there is nothing to sort or merge.
-- **Fetch / decode** are separate stages (`fetch.py`, `pipeline.py`) so the
+- **Fetch / decode** are separate stages (`manifest_store/fetch.py`,
+  `pipeline.py`) so the
   overlap strategy can change without touching the planner.
 
 ## Two store backends behind one pipeline

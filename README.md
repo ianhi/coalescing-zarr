@@ -22,21 +22,35 @@ known. It works at three levels:
 - **Storage.** Ends up serving a handful of large range GETs instead of thousands
   of tiny ones, trading a little over-read for far fewer round-trips.
 
-Bytes stream back in completion order, so fetch↔decode overlap is preserved. On
-overhead-bound reads (e.g. Met Office HDF5 with thousands of tiny chunks) this is
-commonly an ~8× speedup over a stock read, from one line.
+Bytes stream back in completion order, so fetch↔decode overlap is preserved. Two
+measured examples of what this buys on overhead-bound reads:
+
+- **Met Office HDF5** (thousands of tiny chunks per array): commonly an **~8×
+  speedup** over a stock read, from one line.
+- **A virtualized NDPI whole-slide image** (`CMU-1`, 198 MB Hamamatsu slide): a
+  tissue-region read that naive virtualization serves as one GET per tile (**~17
+  s**) collapses to a handful of coalesced range requests (**~0.4 s**, ~40×) —
+  byte-identical pixels — and stays roughly flat as network latency climbs, where
+  the per-tile path rises steeply. *(Measured against a local range server with
+  injected per-request latency and a 200 MB/s bandwidth cap.)*
 
 ## Requirements
 
-The store must support `get_many_chunks`, as on this icechunk branch:
-`ian/more-specific-vritual` (`earth-mover/icechunk`). Installable with:
+Coalescing needs a store that exposes `get_many_chunks`. Two ways to get one:
 
-```sh
-pip install --force-reinstall --no-deps \
-  https://github.com/ianhi/icechunk/releases/download/fork-coalescing-wip/icechunk-2.1.0-cp312-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
-```
+- **Forked icechunk** — the native (Rust) `get_many_chunks` on `IcechunkStore`,
+  from the `ian/more-specific-vritual` branch of `earth-mover/icechunk`. This is
+  the fast path the openers use by default. See [Installation](#installation).
+- **Our `CoalescingManifestStore`** — a pure-Python VirtualiZarr `ManifestStore`
+  that implements `get_many_chunks` itself, so it needs **no forked icechunk**.
+  Slower (the coalescing runs in Python, not Rust), but a drop-in fallback when
+  you can't install the fork. It lives in the `coalescing_zarr.manifest_store`
+  subpackage; build one with
+  `CoalescingManifestStore.from_icechunk_session(...)`:
 
-See [Installation](#installation) for other platforms.
+  ```python
+  from coalescing_zarr.manifest_store import CoalescingManifestStore
+  ```
 
 ## Quickstart
 

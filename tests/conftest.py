@@ -20,7 +20,7 @@ from obstore.store import LocalStore
 from virtualizarr.manifests import ChunkManifest, ManifestArray, ManifestGroup
 from virtualizarr.manifests.utils import create_v3_array_metadata
 
-from coalescing_zarr.store import CoalescingManifestStore
+from coalescing_zarr.manifest_store import CoalescingManifestStore
 
 # 4 rows x 4 cols int32 == 64 bytes per chunk.
 CHUNK_ROWS = 4

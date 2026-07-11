@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from coalescing_zarr.planning import ResolvedChunk, plan_spans
+from coalescing_zarr.manifest_store import ResolvedChunk, plan_spans
 
 
 class _FakeStore:

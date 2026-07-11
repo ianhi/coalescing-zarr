@@ -1,6 +1,7 @@
 """Concurrent span fetch + completion-order streaming.
 
-Shared by every coalescing store: once :func:`~coalescing_zarr.planning.plan_spans`
+Shared by the pure-Python coalescing store: once
+:func:`~coalescing_zarr.manifest_store.planning.plan_spans`
 has grouped chunks into byte-range spans, this fetches the spans concurrently and
 yields each member chunk's bytes as its span's range GET completes — so the caller
 can decode a chunk the instant it arrives, overlapping decode with in-flight fetches.
@@ -19,8 +20,8 @@ if TYPE_CHECKING:
 
     from zarr.core.buffer import Buffer, BufferPrototype
 
-    from coalescing_zarr.planning import Span
-    from coalescing_zarr.store import CoalescingStats
+    from coalescing_zarr.manifest_store.planning import Span
+    from coalescing_zarr.manifest_store.store import CoalescingStats
 
 
 async def stream_span_members(

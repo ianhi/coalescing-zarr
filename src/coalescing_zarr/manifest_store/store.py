@@ -4,9 +4,10 @@ This subclasses VirtualiZarr's :class:`~virtualizarr.manifests.ManifestStore`
 (which already knows how to resolve a chunk key to a byte range in a backing
 file via the manifest, and fetch it through obstore) and adds one method:
 ``get_many_chunks``. That method resolves all requested keys, plans coalesced
-byte-range spans (:func:`coalescing_zarr.planning.plan_spans`), fetches the
-spans concurrently, and streams the per-chunk bytes back **in completion
-order** so the caller can decode each chunk the instant it arrives.
+byte-range spans
+(:func:`coalescing_zarr.manifest_store.planning.plan_spans`), fetches the spans
+concurrently, and streams the per-chunk bytes back **in completion order** so the
+caller can decode each chunk the instant it arrives.
 
 The resolution logic in :meth:`_resolve` mirrors ``ManifestStore.get`` but stops
 just before fetching — this is the "derive the effective shard index" step. In
@@ -27,8 +28,8 @@ from virtualizarr.manifests.store import ManifestStore, _get_deepest_group_or_ar
 from virtualizarr.manifests.utils import parse_manifest_index
 
 from coalescing_zarr.config import DEFAULT_MAX_COALESCED_BYTES, DEFAULT_MAX_GAP
-from coalescing_zarr.fetch import stream_span_members
-from coalescing_zarr.planning import ResolvedChunk, plan_spans
+from coalescing_zarr.manifest_store.fetch import stream_span_members
+from coalescing_zarr.manifest_store.planning import ResolvedChunk, plan_spans
 
 if TYPE_CHECKING:
     import icechunk

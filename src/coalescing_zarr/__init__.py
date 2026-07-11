@@ -1,4 +1,10 @@
-"""Store-level range coalescing for virtualized Zarr data."""
+"""Store-level range coalescing for virtualized Zarr data.
+
+The main entry points open Icechunk data through the coalescing codec pipeline,
+which drives a store's native ``get_many_chunks``. The pure-Python fallback store
+(for when you can't install the forked icechunk) lives in the
+:mod:`coalescing_zarr.manifest_store` subpackage.
+"""
 
 from __future__ import annotations
 
@@ -10,21 +16,14 @@ from coalescing_zarr.config import (
 )
 from coalescing_zarr.dataset import open_zarr_coalesced
 from coalescing_zarr.pipeline import CachedGetter, CoalescingCodecPipeline
-from coalescing_zarr.planning import ResolvedChunk, Span, plan_spans
 from coalescing_zarr.region import read_region
-from coalescing_zarr.store import CoalescingManifestStore, CoalescingStats
 
 __all__ = [
     "DEFAULT_MAX_COALESCED_BYTES",
     "DEFAULT_MAX_GAP",
     "CachedGetter",
     "CoalescingCodecPipeline",
-    "CoalescingManifestStore",
-    "CoalescingStats",
-    "ResolvedChunk",
-    "Span",
     "open_zarr_coalesced",
-    "plan_spans",
     "read_region",
     "register_pipeline",
     "use_default_pipeline",
