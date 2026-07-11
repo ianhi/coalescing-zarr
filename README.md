@@ -26,6 +26,18 @@ Bytes stream back in completion order, so fetch↔decode overlap is preserved. O
 overhead-bound reads (e.g. Met Office HDF5 with thousands of tiny chunks) this is
 commonly an ~8× speedup over a stock read, from one line.
 
+## Requirements
+
+The store must support `get_many_chunks`, as on this icechunk branch:
+`ian/more-specific-vritual` (`earth-mover/icechunk`). Installable with:
+
+```sh
+pip install --force-reinstall --no-deps \
+  https://github.com/ianhi/icechunk/releases/download/fork-coalescing-wip/icechunk-2.1.0-cp312-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+```
+
+See [Installation](#installation) for other platforms.
+
 ## Quickstart
 
 ```python
