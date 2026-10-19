@@ -93,7 +93,9 @@ share a grid (e.g. GOES bands), then decodes and assembles each:
 ```python
 from coalescing_zarr import read_region
 
-out = read_region(session, ["grp/CMI_C01", "grp/CMI_C02"], (slice(0, 512), slice(0, 512)))
+out = read_region(
+    session, ["grp/CMI_C01", "grp/CMI_C02"], (slice(0, 512), slice(0, 512))
+)
 # {"grp/CMI_C01": ndarray, "grp/CMI_C02": ndarray}
 ```
 
@@ -156,7 +158,9 @@ import coiled
 
 coiled.create_software_environment(
     name="icechunk-coalescing",
-    pip=["https://github.com/ianhi/icechunk/releases/download/fork-coalescing-wip/icechunk-2.1.0-cp312-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"],
+    pip=[
+        "https://github.com/ianhi/icechunk/releases/download/fork-coalescing-wip/icechunk-2.1.0-cp312-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+    ],
 )
 ```
 
